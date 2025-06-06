@@ -1,0 +1,54 @@
+Scenario2 (无人机协作组网环境) 测试报告
+============================================================
+测试时间: 20250606_164421
+总测试数: 10
+通过测试: 9
+失败测试: 1
+成功率: 90.0%
+
+详细测试结果:
+----------------------------------------
+✓ 环境初始化测试 - 通过 (0.206s)
+    默认配置: 通过
+    小规模配置: 通过
+    大规模配置: 通过
+    多地面基站配置: 失败
+✓ 基本功能测试 - 通过 (0.134s)
+    reset: 通过
+    step: 通过
+    multi_step: 通过
+✓ UAV连接和角色分配测试 - 通过 (0.035s)
+    uav_connections: 通过
+    uav_bs_connections: 通过
+    uav_roles: 通过
+✓ 路由路径计算测试 - 通过 (0.085s)
+    routing_paths: 通过
+    connectivity: 通过
+✓ 奖励机制测试 - 通过 (0.096s)
+    reward_mechanism: 通过
+    weight_configs: 通过
+✓ SINR和吞吐量计算测试 - 通过 (0.026s)
+    sinr_matrix: 通过
+    throughput: 通过
+    backhaul: 通过
+✗ 场景特定功能测试 - 失败: index 1 is out of bounds for axis 0 with size 1
+✓ 性能和压力测试 - 通过 (24.748s)
+    large_scale: 完成
+    distributions: 完成
+✓ 可视化功能测试 - 通过 (0.351s)
+    render: 通过
+✓ 集成测试 - 通过 (0.752s)
+    multi_episode: 通过
+    reproducibility: 通过
+
+测试建议:
+----------------------------------------
+⚠ 存在失败的测试，请检查相关功能。
+✓ 环境质量良好，可以用于训练和实验。
+
+文件输出:
+----------------------------------------
+日志文件: test_scenario2_20250606_164421.log
+可视化图表: scenario2_test_visualization_20250606_164421.png
+网络拓扑图: scenario2_network_topology_20250606_164421.png
+测试报告: test_scenario2_report_20250606_164421.txt

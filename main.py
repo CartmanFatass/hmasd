@@ -43,23 +43,68 @@ def get_device(device_pref):
 # 解析命令行参数
 def parse_args():
     parser = argparse.ArgumentParser(description='HMASD: 层次化多智能体技能发现')
+    # 运行模式和环境参数
     parser.add_argument('--mode', type=str, default='train', help='运行模式: train或eval')
-    parser.add_argument('--scenario', type=int, default=1, help='场景: 1=基站模式, 2=协作组网模式')
+    parser.add_argument('--scenario', type=int, default=2, help='场景: 1=基站模式, 2=协作组网模式')
     parser.add_argument('--model_path', type=str, default='models/hmasd_model.pt', help='模型保存/加载路径')
     parser.add_argument('--log_dir', type=str, default='logs', help='日志目录')
-    parser.add_argument('--state_dim', type=int, help='全局状态维度')
-    parser.add_argument('--obs_dim', type=int, help='观测维度')
     parser.add_argument('--eval_episodes', type=int, default=10, help='评估的episode数量')
     parser.add_argument('--render', action='store_true', help='是否渲染环境')
-    parser.add_argument('--n_uavs', type=int, default=5, help='无人机数量')
+    parser.add_argument('--device', type=str, default='auto', 
+                        choices=['auto', 'cuda', 'cpu'], help='计算设备: auto=自动选择, cuda=GPU, cpu=CPU')
+
+    # 环境参数
+    parser.add_argument('--n_agents', type=int, default=10, help='无人机数量上限')
+    parser.add_argument('--n_uavs', type=int, default=5, help='初始无人机数量')
     parser.add_argument('--n_users', type=int, default=50, help='用户数量')
     parser.add_argument('--max_hops', type=int, default=3, help='最大跳数 (仅用于场景2)')
+    parser.add_argument('--state_dim', type=int, help='全局状态维度')
+    parser.add_argument('--obs_dim', type=int, help='观测维度')
+    parser.add_argument('--action_dim', type=int, default=3, help='每个智能体输出维度')
     parser.add_argument('--user_distribution', type=str, default='uniform', 
                         choices=['uniform', 'cluster', 'hotspot'], help='用户分布类型')
     parser.add_argument('--channel_model', type=str, default='free_space',
                         choices=['free_space', 'urban', 'suburban'], help='信道模型')
-    parser.add_argument('--device', type=str, default='auto', 
-                        choices=['auto', 'cuda', 'cpu'], help='计算设备: auto=自动选择, cuda=GPU, cpu=CPU')
+
+    # HMASD参数
+    parser.add_argument('--n_Z', type=int, default=10, help='团队技能数量')
+    parser.add_argument('--n_z', type=int, default=10, help='个体技能数量')
+    parser.add_argument('--k', type=int, default=50, help='技能分配间隔')
+
+    # 网络参数
+    parser.add_argument('--hidden_size', type=int, default=256, help='隐藏层大小')
+    parser.add_argument('--embedding_dim', type=int, default=128, help='嵌入维度')
+    parser.add_argument('--n_encoder_layers', type=int, default=3, help='编码器层数')
+    parser.add_argument('--n_decoder_layers', type=int, default=3, help='解码器层数')
+    parser.add_argument('--n_heads', type=int, default=8, help='多头注意力头数')
+    parser.add_argument('--gru_hidden_size', type=int, default=256, help='GRU隐藏层大小')
+    parser.add_argument('--lr_coordinator', type=float, default=3e-4, help='技能协调器学习率')
+    parser.add_argument('--lr_discoverer', type=float, default=3e-4, help='技能发现器学习率')
+    parser.add_argument('--lr_discriminator', type=float, default=3e-4, help='技能判别器学习率')
+
+    # PPO参数
+    parser.add_argument('--gamma', type=float, default=0.99, help='折扣因子')
+    parser.add_argument('--gae_lambda', type=float, default=0.95, help='GAE参数')
+    parser.add_argument('--clip_epsilon', type=float, default=0.2, help='PPO裁剪参数')
+    parser.add_argument('--ppo_epochs', type=int, default=15, help='PPO迭代次数')
+    parser.add_argument('--value_loss_coef', type=float, default=0.5, help='价值损失系数')
+    parser.add_argument('--entropy_coef', type=float, default=0.01, help='熵损失系数')
+    parser.add_argument('--max_grad_norm', type=float, default=0.5, help='最大梯度范数')
+
+    # HMASD损失权重
+    parser.add_argument('--lambda_e', type=float, default=1.0, help='外部奖励权重')
+    parser.add_argument('--lambda_D', type=float, default=0.1, help='团队技能判别器奖励权重')
+    parser.add_argument('--lambda_d', type=float, default=0.1, help='个体技能判别器奖励权重')
+    parser.add_argument('--lambda_h', type=float, default=0.01, help='高层策略熵权重')
+    parser.add_argument('--lambda_l', type=float, default=0.01, help='低层策略熵权重')
+
+    # 训练参数
+    parser.add_argument('--buffer_size', type=int, default=1024, help='经验回放缓冲区大小')
+    parser.add_argument('--batch_size', type=int, default=128, help='批处理大小')
+    parser.add_argument('--high_level_batch_size', type=int, default=16, help='高层更新批处理大小')
+    parser.add_argument('--num_envs', type=int, default=16, help='并行环境数量')
+    parser.add_argument('--total_timesteps', type=float, default=5e6, help='总时间步数')
+    parser.add_argument('--eval_interval', type=int, default=1000, help='评估间隔')
     
     return parser.parse_args()
 
@@ -284,7 +329,56 @@ def evaluate(env, agent, n_episodes=10, render=False):
 # 主函数
 def main():
     args = parse_args()
+    
+    # 使用解析的参数创建配置
     config = Config()
+    
+    # 更新配置参数
+    # 环境参数
+    config.n_agents = args.n_agents
+    config.action_dim = args.action_dim
+    
+    # HMASD参数
+    config.n_Z = args.n_Z
+    config.n_z = args.n_z
+    config.k = args.k
+    
+    # 网络参数
+    config.hidden_size = args.hidden_size
+    config.embedding_dim = args.embedding_dim
+    config.n_encoder_layers = args.n_encoder_layers
+    config.n_decoder_layers = args.n_decoder_layers
+    config.n_heads = args.n_heads
+    config.gru_hidden_size = args.gru_hidden_size
+    config.lr_coordinator = args.lr_coordinator
+    config.lr_discoverer = args.lr_discoverer
+    config.lr_discriminator = args.lr_discriminator
+    
+    # PPO参数
+    config.gamma = args.gamma
+    config.gae_lambda = args.gae_lambda
+    config.clip_epsilon = args.clip_epsilon
+    config.ppo_epochs = args.ppo_epochs
+    config.value_loss_coef = args.value_loss_coef
+    config.entropy_coef = args.entropy_coef
+    config.max_grad_norm = args.max_grad_norm
+    
+    # HMASD损失权重
+    config.lambda_e = args.lambda_e
+    config.lambda_D = args.lambda_D
+    config.lambda_d = args.lambda_d
+    config.lambda_h = args.lambda_h
+    config.lambda_l = args.lambda_l
+    
+    # 训练参数
+    config.buffer_size = args.buffer_size
+    config.batch_size = args.batch_size
+    config.num_envs = args.num_envs
+    config.total_timesteps = args.total_timesteps
+    config.eval_interval = args.eval_interval
+    
+    # 新增参数
+    config.high_level_batch_size = args.high_level_batch_size
     
     # 获取计算设备
     device = get_device(args.device)

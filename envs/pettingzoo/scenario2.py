@@ -20,7 +20,7 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         height_range=(50, 150),
         max_speed=30,
         time_step=1.0,
-        max_steps=500,
+        max_steps=5000,
         user_distribution="uniform",
         channel_model="free_space",
         render_mode=None,
@@ -28,9 +28,10 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         min_sinr=0,  # 最小SINR阈值 (dB)
         max_connections=10,  # 每个无人机最大连接数
         max_hops=3,  # 最大跳数 (3-5可调)
-        coverage_weight=0.5,  # 覆盖率权重
-        quality_weight=0.3,  # 服务质量权重
+        coverage_weight=0.4,  # 覆盖率权重
+        quality_weight=0.2,  # 服务质量权重
         connectivity_weight=0.2,  # 网络连通性权重
+        throughput_weight=0.2,  # 吞吐量权重
         n_ground_bs=1,  # 地面基站数量
     ):
         """
@@ -54,6 +55,7 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
             coverage_weight: 覆盖率权重
             quality_weight: 服务质量权重
             connectivity_weight: 网络连通性权重
+            throughput_weight: 吞吐量权重
             n_ground_bs: 地面基站数量
         """
         # 先保存关键参数，防止在父类初始化时就需要使用
@@ -64,6 +66,11 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         self.coverage_weight = coverage_weight
         self.quality_weight = quality_weight
         self.connectivity_weight = connectivity_weight
+        self.throughput_weight = throughput_weight
+        self.area_size = area_size  # 需要在初始化地面基站之前设置
+        
+        # 初始化地面基站位置（在调用父类初始化之前）
+        self._init_ground_bs()
         
         # 调用父类初始化
         super().__init__(
@@ -83,9 +90,6 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         # 场景名称
         self.metadata["name"] = "uav_cooperative_network_v0"
         
-        # 初始化地面基站位置
-        self._init_ground_bs()
-        
         # 初始化UAV连接矩阵和角色
         self.uav_connections = np.zeros((self.n_uavs, self.n_uavs), dtype=bool)  # UAV之间的连接
         self.uav_bs_connections = np.zeros((self.n_uavs, self.n_ground_bs), dtype=bool)  # UAV到地面基站的连接
@@ -97,27 +101,52 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
     
     def _init_ground_bs(self):
         """初始化地面基站位置"""
+        # 确保总是创建正确数量的地面基站
+        self.ground_bs_positions = np.zeros((self.n_ground_bs, 3))
+        
         if self.n_ground_bs == 1:
             # 单个地面基站放在中心
-            self.ground_bs_positions = np.array([[self.area_size/2, self.area_size/2, 30]])
+            self.ground_bs_positions[0] = [self.area_size/2, self.area_size/2, 30]
+        elif self.n_ground_bs == 2:
+            # 两个基站分布在对角
+            self.ground_bs_positions[0] = [self.area_size * 0.25, self.area_size * 0.25, 30]
+            self.ground_bs_positions[1] = [self.area_size * 0.75, self.area_size * 0.75, 30]
+        elif self.n_ground_bs == 3:
+            # 三个基站三角分布
+            self.ground_bs_positions[0] = [self.area_size * 0.5, self.area_size * 0.2, 30]
+            self.ground_bs_positions[1] = [self.area_size * 0.2, self.area_size * 0.8, 30]
+            self.ground_bs_positions[2] = [self.area_size * 0.8, self.area_size * 0.8, 30]
+        elif self.n_ground_bs == 4:
+            # 四个角落
+            self.ground_bs_positions[0] = [self.area_size * 0.2, self.area_size * 0.2, 30]
+            self.ground_bs_positions[1] = [self.area_size * 0.2, self.area_size * 0.8, 30]
+            self.ground_bs_positions[2] = [self.area_size * 0.8, self.area_size * 0.2, 30]
+            self.ground_bs_positions[3] = [self.area_size * 0.8, self.area_size * 0.8, 30]
         else:
-            # 多个地面基站均匀分布
-            self.ground_bs_positions = np.zeros((self.n_ground_bs, 3))
-            if self.n_ground_bs == 4:
-                # 四个角落
-                positions = [
-                    [self.area_size * 0.2, self.area_size * 0.2, 30],
-                    [self.area_size * 0.2, self.area_size * 0.8, 30],
-                    [self.area_size * 0.8, self.area_size * 0.2, 30],
-                    [self.area_size * 0.8, self.area_size * 0.8, 30]
-                ]
-                self.ground_bs_positions = np.array(positions[:self.n_ground_bs])
+            # 更多地面基站时使用网格或随机分布
+            if self.n_ground_bs <= 9:
+                # 使用网格分布（最多3x3）
+                grid_size = int(np.ceil(np.sqrt(self.n_ground_bs)))
+                positions_generated = 0
+                
+                for i in range(grid_size):
+                    for j in range(grid_size):
+                        if positions_generated >= self.n_ground_bs:
+                            break
+                        
+                        x = self.area_size * (0.2 + 0.6 * i / max(1, grid_size - 1))
+                        y = self.area_size * (0.2 + 0.6 * j / max(1, grid_size - 1))
+                        self.ground_bs_positions[positions_generated] = [x, y, 30]
+                        positions_generated += 1
+                    
+                    if positions_generated >= self.n_ground_bs:
+                        break
             else:
                 # 随机分布
                 for i in range(self.n_ground_bs):
                     self.ground_bs_positions[i] = [
-                        self.np_random.uniform(0, self.area_size),
-                        self.np_random.uniform(0, self.area_size),
+                        np.random.uniform(self.area_size * 0.1, self.area_size * 0.9),
+                        np.random.uniform(self.area_size * 0.1, self.area_size * 0.9),
                         30  # 固定高度
                     ]
     
@@ -126,8 +155,8 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         重置环境
         
         返回:
-            state: 全局状态
-            observations: 所有智能体的观测
+            observations: 所有智能体的观测字典
+            infos: 所有智能体的信息字典
         """
         # 由于在父类的reset中会用到self.n_ground_bs，我们需要先确保它被正确设置
         # 确保地面基站位置被初始化
@@ -135,7 +164,7 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
             self._init_ground_bs()
             
         # 调用父类的reset
-        state, observations = super().reset(seed, options)
+        observations, infos = super().reset(seed, options)
         
         # 重置UAV连接矩阵和角色
         self.uav_connections = np.zeros((self.n_uavs, self.n_uavs), dtype=bool)
@@ -148,14 +177,14 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         self._assign_uav_roles()
         self._compute_routing_paths()
         
-        # 更新观测
-        observations = self._update_observations(observations)
+        # 更新观测 (使用字典版本)
+        observations = self._update_observations_dict(observations)
         
-        return state, observations
+        return observations, infos
     
     def _update_observations(self, observations):
         """
-        更新观测，添加UAV角色和连接信息
+        更新观测，添加UAV角色和连接信息（用于数组格式的观测）
         
         参数:
             observations: 原始观测
@@ -190,22 +219,66 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         
         return np.array(updated_observations)
     
+    def _update_observations_dict(self, observations_dict):
+        """
+        更新观测，添加UAV角色和连接信息（用于字典格式的观测）
+        
+        参数:
+            observations_dict: 原始观测字典
+            
+        返回:
+            updated_observations_dict: 更新后的观测字典
+        """
+        updated_observations_dict = {}
+        
+        for i, agent in enumerate(self.agents):
+            # 获取原始观测
+            obs_dict = observations_dict[agent]
+            obs = obs_dict["obs"]
+            
+            # 添加UAV角色信息（独热编码）
+            role_onehot = np.zeros(3)  # [未分配, 基站, 中继]
+            if self.uav_roles[i] < 3:
+                role_onehot[self.uav_roles[i]] = 1
+            
+            # 添加到地面基站的连接信息
+            bs_connections = self.uav_bs_connections[i]
+            
+            # 添加跳数信息（归一化）
+            if i in self.routing_paths:
+                hop_count = len(self.routing_paths[i])
+                normalized_hop = min(hop_count / self.max_hops, 1.0)
+            else:
+                normalized_hop = 1.0  # 无路径时设为最大值
+            
+            # 组合新的观测
+            new_obs = np.concatenate([obs, role_onehot, bs_connections, [normalized_hop]])
+            
+            # 更新观测字典
+            updated_obs_dict = {
+                "obs": new_obs,
+                "action_mask": obs_dict["action_mask"]
+            }
+            updated_observations_dict[agent] = updated_obs_dict
+        
+        return updated_observations_dict
+    
     def step(self, actions):
         """
         执行环境步骤
         
         参数:
-            actions: 所有智能体的动作 [n_uavs, 3]
+            actions: 所有智能体的动作字典 {agent_id: action}
             
         返回:
-            next_state: 下一个全局状态
-            next_observations: 所有智能体的下一个观测
-            reward: 全局奖励
-            done: 是否结束
-            info: 额外信息
+            observations: 所有智能体的下一个观测字典
+            rewards: 所有智能体的奖励字典
+            terminations: 所有智能体的终止状态字典
+            truncations: 所有智能体的截断状态字典
+            infos: 所有智能体的信息字典
         """
         # 执行父类的step
-        next_state, next_observations, reward, done, info = super().step(actions)
+        observations, rewards, terminations, truncations, infos = super().step(actions)
         
         # 更新UAV连接和角色
         self._update_uav_connections()
@@ -213,22 +286,29 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         self._compute_routing_paths()
         
         # 更新观测
-        next_observations = self._update_observations(next_observations)
+        observations = self._update_observations_dict(observations)
         
         # 计算新的奖励
-        reward = self._compute_reward()
+        global_reward = self._compute_reward()
         
-        # 添加场景特定信息
-        info.update({
+        # 更新每个智能体的奖励
+        for agent in self.agents:
+            rewards[agent] = global_reward / self.n_uavs
+        
+        # 添加场景特定信息到每个智能体的info中
+        scenario_info = {
             "scenario": "cooperative_network",
             "reward_info": self.reward_info if hasattr(self, "reward_info") else {},
-            "coverage_ratio": np.sum(self.connections) / self.n_users,
+            "coverage_ratio": np.sum(self.connections) / self.n_users if self.n_users > 0 else 0,  # 避免除零错误
             "connectivity_ratio": self._compute_connectivity_ratio(),
             "uav_roles": self.uav_roles.copy(),
             "routing_paths": {k: v.copy() for k, v in self.routing_paths.items()},
-        })
+        }
         
-        return next_state, next_observations, reward, done, info
+        for agent in self.agents:
+            infos[agent].update(scenario_info)
+        
+        return observations, rewards, terminations, truncations, infos
     
     def _update_uav_connections(self):
         """更新UAV之间的连接和UAV到地面基站的连接"""
@@ -379,6 +459,139 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         
         return connectivity_ratio
     
+    def _compute_throughput(self, uav_idx, user_idx):
+        """
+        计算UAV-用户连接的吞吐量 (bps)
+        
+        参数:
+            uav_idx: 无人机索引
+            user_idx: 用户索引
+            
+        返回:
+            throughput: 吞吐量 (bps)
+        """
+        if not self.connections[uav_idx, user_idx]:
+            return 0
+        
+        # 获取SINR (dB)
+        sinr_db = self.sinr_matrix[uav_idx, user_idx]
+        
+        # 转换为线性单位
+        sinr_linear = 10 ** (sinr_db / 10)
+        
+        # 香农定理计算吞吐量: C = B * log2(1 + SINR_linear)
+        throughput = self.bandwidth * np.log2(1 + sinr_linear)
+        
+        return throughput  # 单位：bps
+    
+    def _compute_backhaul_capacity(self, uav_idx):
+        """
+        计算UAV的回程容量
+        
+        参数:
+            uav_idx: 无人机索引
+            
+        返回:
+            backhaul_capacity: 回程容量 (bps)
+        """
+        if uav_idx not in self.routing_paths:
+            return 0
+        
+        path = self.routing_paths[uav_idx]
+        if not path:
+            return 0
+        
+        # 如果直接连接到地面基站
+        if len(path) == 1 and path[0][0] == "ground_bs":
+            # 使用UAV到地面基站的链路容量
+            bs_idx = path[0][1]
+            distance = self._compute_distance(self.uav_positions[uav_idx], self.ground_bs_positions[bs_idx])
+            safe_distance = max(distance, 1e-6)
+            path_loss = 20 * np.log10(safe_distance) + 20 * np.log10(4 * np.pi * self.carrier_frequency / 3e8)
+            rx_power = self.ground_bs_tx_power - path_loss
+            sinr_db = rx_power - self.noise_power
+            sinr_linear = 10 ** (sinr_db / 10)
+            backhaul_capacity = self.bandwidth * np.log2(1 + sinr_linear)
+        else:
+            # 多跳路径，需要找到瓶颈链路
+            min_capacity = float('inf')
+            
+            # 计算路径上每一跳的容量
+            for i in range(len(path) - 1):
+                current_node = path[i]
+                next_node = path[i + 1]
+                
+                if current_node[0] == "uav" and next_node[0] == "uav":
+                    # UAV到UAV的链路
+                    uav1_idx = current_node[1]
+                    uav2_idx = next_node[1]
+                    
+                    distance = self._compute_distance(self.uav_positions[uav1_idx], self.uav_positions[uav2_idx])
+                    safe_distance = max(distance, 1e-6)
+                    path_loss = 20 * np.log10(safe_distance) + 20 * np.log10(4 * np.pi * self.carrier_frequency / 3e8)
+                    rx_power = self.tx_power - path_loss
+                    sinr_db = rx_power - self.noise_power
+                    sinr_linear = 10 ** (sinr_db / 10)
+                    link_capacity = self.bandwidth * np.log2(1 + sinr_linear)
+                    
+                elif current_node[0] == "uav" and next_node[0] == "ground_bs":
+                    # UAV到地面基站的链路
+                    uav_idx_link = current_node[1]
+                    bs_idx = next_node[1]
+                    
+                    distance = self._compute_distance(self.uav_positions[uav_idx_link], self.ground_bs_positions[bs_idx])
+                    safe_distance = max(distance, 1e-6)
+                    path_loss = 20 * np.log10(safe_distance) + 20 * np.log10(4 * np.pi * self.carrier_frequency / 3e8)
+                    rx_power = self.ground_bs_tx_power - path_loss
+                    sinr_db = rx_power - self.noise_power
+                    sinr_linear = 10 ** (sinr_db / 10)
+                    link_capacity = self.bandwidth * np.log2(1 + sinr_linear)
+                else:
+                    link_capacity = self.bandwidth  # 默认值
+                
+                min_capacity = min(min_capacity, link_capacity)
+            
+            backhaul_capacity = min_capacity if min_capacity != float('inf') else 0
+        
+        return backhaul_capacity
+    
+    def _compute_effective_throughput(self, uav_idx, user_idx):
+        """
+        计算考虑多跳路径的有效吞吐量
+        
+        参数:
+            uav_idx: 无人机索引
+            user_idx: 用户索引
+            
+        返回:
+            effective_throughput: 有效吞吐量 (bps)
+        """
+        if not self.connections[uav_idx, user_idx]:
+            return 0
+        
+        # 基础吞吐量（UAV到用户的链路容量）
+        base_throughput = self._compute_throughput(uav_idx, user_idx)
+        
+        # 如果UAV有到地面基站的路径，考虑回程瓶颈
+        if uav_idx in self.routing_paths:
+            path = self.routing_paths[uav_idx]
+            hop_count = len(path)
+            
+            # 多跳效率损失：每一跳都会降低有效吞吐量
+            hop_efficiency = 1.0 / hop_count if hop_count > 0 else 0
+            
+            # 考虑回程链路容量限制
+            backhaul_capacity = self._compute_backhaul_capacity(uav_idx)
+            
+            # 有效吞吐量取最小值（瓶颈原则）
+            adjusted_throughput = base_throughput * hop_efficiency
+            effective_throughput = min(adjusted_throughput, backhaul_capacity)
+        else:
+            # 无路径到地面基站，吞吐量为0
+            effective_throughput = 0
+        
+        return effective_throughput
+    
     def _compute_reward(self):
         """
         计算奖励
@@ -407,6 +620,25 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         connectivity_ratio = self._compute_connectivity_ratio()
         connectivity_reward = connectivity_ratio
         
+        # 【新增】吞吐量奖励
+        total_throughput = 0
+        max_possible_throughput = 0
+        
+        for i in range(self.n_uavs):
+            for j in range(self.n_users):
+                # 计算实际有效吞吐量
+                if self.connections[i, j]:
+                    actual_throughput = self._compute_effective_throughput(i, j)
+                    total_throughput += actual_throughput
+                
+                # 计算理论最大吞吐量（假设完美信道条件：30dB SINR）
+                max_sinr_linear = 10 ** (30 / 10)  # 30dB转换为线性
+                max_link_throughput = self.bandwidth * np.log2(1 + max_sinr_linear)
+                max_possible_throughput += max_link_throughput
+        
+        # 归一化吞吐量奖励
+        throughput_reward = total_throughput / max_possible_throughput if max_possible_throughput > 0 else 0
+        
         # 跳数惩罚：路径越长，惩罚越大
         total_hops = 0
         for path in self.routing_paths.values():
@@ -419,7 +651,8 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         reward = (
             self.coverage_weight * coverage_reward + 
             self.quality_weight * quality_reward + 
-            self.connectivity_weight * connectivity_reward -
+            self.connectivity_weight * connectivity_reward +
+            self.throughput_weight * throughput_reward -
             hop_penalty
         )
         
@@ -428,8 +661,11 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
             "coverage_reward": coverage_reward,
             "quality_reward": quality_reward,
             "connectivity_reward": connectivity_reward,
+            "throughput_reward": throughput_reward,
             "hop_penalty": hop_penalty,
-            "total_reward": reward
+            "total_reward": reward,
+            "total_throughput_mbps": total_throughput / 1e6,  # 转换为Mbps
+            "avg_throughput_per_user_mbps": (total_throughput / max(connected_users, 1)) / 1e6
         }
         
         return reward
@@ -501,6 +737,15 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         role_counts = np.bincount(self.uav_roles, minlength=3)
         self.ax.text2D(0.02, 0.85, f'角色: 基站={role_counts[1]}, 中继={role_counts[2]}, 未分配={role_counts[0]}', 
                       transform=self.ax.transAxes)
+        
+        # 添加吞吐量信息
+        if hasattr(self, 'reward_info') and 'total_throughput_mbps' in self.reward_info:
+            total_throughput_mbps = self.reward_info['total_throughput_mbps']
+            avg_throughput_mbps = self.reward_info['avg_throughput_per_user_mbps']
+            self.ax.text2D(0.02, 0.80, f'总吞吐量: {total_throughput_mbps:.1f} Mbps', 
+                          transform=self.ax.transAxes)
+            self.ax.text2D(0.02, 0.75, f'平均用户吞吐量: {avg_throughput_mbps:.1f} Mbps', 
+                          transform=self.ax.transAxes)
         
         self.fig.canvas.draw()
         

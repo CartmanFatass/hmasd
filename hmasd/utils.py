@@ -2,40 +2,111 @@ import torch
 import numpy as np
 from collections import deque
 import random
+from logger import main_logger
 
 class ReplayBuffer:
     """经验回放缓冲区，用于存储和采样训练数据"""
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
+        self.capacity = capacity
+        self._total_added = 0
+        self._total_sampled = 0
+        self._structure_validated = False
     
-    def push(self, *args):
-        """将经验存入缓冲区"""
-        self.buffer.append(args)
+    def push(self, experience):
+        """
+        将经验存入缓冲区
+        
+        参数:
+            experience: 经验元组，或参数列表(通过*args收集的多个参数)
+        """
+        # 如果传入的是多个参数，自动打包为元组
+        if not isinstance(experience, tuple):
+            experience = (experience,)
+        
+        # 记录添加计数
+        if len(self.buffer) >= self.capacity:
+            self._total_added += 1
+        
+        self.buffer.append(experience)
+        
+    def clear(self):
+        """清空缓冲区"""
+        self.buffer.clear()
+        self._total_added = 0
+        self._total_sampled = 0
+        self._structure_validated = False
     
     def sample(self, batch_size):
         """从缓冲区中随机采样一批经验"""
-        return random.sample(self.buffer, min(len(self.buffer), batch_size))
+        sampled_batch = random.sample(self.buffer, min(len(self.buffer), batch_size))
+        self._total_sampled += len(sampled_batch)
+        
+        # 验证样本结构
+        if not self._structure_validated and sampled_batch:
+            sample_structure = len(sampled_batch[0])
+            main_logger.debug(f"缓冲区样本结构: 包含 {sample_structure} 个元素")
+            self._structure_validated = True
+            
+        return sampled_batch
     
     def __len__(self):
         """返回缓冲区的当前大小"""
         return len(self.buffer)
+    
+    def get_stats(self):
+        """获取缓冲区统计信息"""
+        return {
+            "size": len(self.buffer),
+            "capacity": self.capacity,
+            "total_added": self._total_added,
+            "total_sampled": self._total_sampled,
+            "utilization": len(self.buffer) / self.capacity if self.capacity > 0 else 0
+        }
 
 class StateSkillDataset:
     """状态-技能对数据集，用于训练技能判别器"""
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
+        self.capacity = capacity
+        self._total_added = 0
+        self._total_sampled = 0
     
     def push(self, state, team_skill, observations, agent_skills):
         """将状态-技能对存入数据集"""
-        self.buffer.append((state, team_skill, observations, agent_skills))
+        experience = (state, team_skill, observations, agent_skills)
+        
+        # 记录添加计数
+        if len(self.buffer) >= self.capacity:
+            self._total_added += 1
+            
+        self.buffer.append(experience)
+        
+    def clear(self):
+        """清空数据集"""
+        self.buffer.clear()
+        self._total_added = 0
+        self._total_sampled = 0
     
     def sample(self, batch_size):
         """从数据集中随机采样一批数据"""
-        return random.sample(self.buffer, min(len(self.buffer), batch_size))
+        sampled_batch = random.sample(self.buffer, min(len(self.buffer), batch_size))
+        self._total_sampled += len(sampled_batch)
+        return sampled_batch
     
     def __len__(self):
         """返回数据集的当前大小"""
         return len(self.buffer)
+        
+    def get_stats(self):
+        """获取数据集统计信息"""
+        return {
+            "size": len(self.buffer),
+            "capacity": self.capacity,
+            "total_added": self._total_added,
+            "total_sampled": self._total_sampled,
+            "utilization": len(self.buffer) / self.capacity if self.capacity > 0 else 0
+        }
 
 def compute_gae(rewards, values, next_values, dones, gamma, lam):
     """

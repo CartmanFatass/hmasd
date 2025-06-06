@@ -1,19 +1,19 @@
 import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import Box, Dict
-from pettingzoo import ParallelEnv
-from pettingzoo.utils import wrappers
+from pettingzoo import AECEnv
+from pettingzoo.utils import agent_selector, wrappers
 
-class MultiUAVEnv(ParallelEnv):
+class MultiUAVEnv(AECEnv):
     """
     多无人机基站环境的基类
     
-    实现了PettingZoo的Parallel接口，提供了基本的无人机和用户模型
+    实现了PettingZoo的AEC接口，提供了基本的无人机和用户模型
     """
     metadata = {
         "render_modes": ["human", "rgb_array"],
         "name": "multi_uav_env_v0",
-        "is_parallelizable": True,
+        "is_parallelizable": False,
     }
     
     def __init__(
@@ -73,14 +73,7 @@ class MultiUAVEnv(ParallelEnv):
         self.max_connections = 10  # 每个无人机最大连接数
         
         # 地面基站参数 (用于场景2)
-        # 默认地面基站数量，可以被子类覆盖
-        if not hasattr(self, 'n_ground_bs'):
-            self.n_ground_bs = 1
-        
-        # 默认地面基站位置，可以被子类覆盖
-        if not hasattr(self, 'ground_bs_positions'):
-            self.ground_bs_positions = np.array([[area_size/2, area_size/2, 30]])  # 中心位置
-        
+        self.ground_bs_positions = np.array([[area_size/2, area_size/2, 30]])  # 中心位置
         self.ground_bs_tx_power = 30  # 地面基站发射功率 (dBm)
         
         # 状态和观测维度
@@ -92,17 +85,21 @@ class MultiUAVEnv(ParallelEnv):
         self.agents = self.possible_agents.copy()
         
         # 定义观测和动作空间
-        self.observation_spaces = {
+        self._observation_spaces = {
             agent: Dict({
                 "obs": Box(low=-float('inf'), high=float('inf'), shape=(self.obs_dim,)),
                 "action_mask": Box(low=0, high=1, shape=(3,))  # 3D速度控制
             }) for agent in self.possible_agents
         }
         
-        self.action_spaces = {
+        self._action_spaces = {
             agent: Box(low=-1, high=1, shape=(3,))  # 归一化的3D速度控制
             for agent in self.possible_agents
         }
+        
+        # 初始化智能体选择器
+        self._agent_selector = agent_selector(self.agents)
+        self.agent_selection = None
         
         # 环境状态
         self.uav_positions = None  # 无人机位置 [n_uavs, 3]
@@ -115,18 +112,16 @@ class MultiUAVEnv(ParallelEnv):
         self.viewer = None
         self.fig = None
         self.ax = None
+        
         # 重置环境
         self.reset(seed=seed)
-
-    # PettingZoo API methods for spaces
+    
     def observation_space(self, agent):
-        """返回指定智能体的观测空间"""
-        return self.observation_spaces[agent]
-
+        return self._observation_spaces[agent]
+    
     def action_space(self, agent):
-        """返回指定智能体的动作空间"""
-        return self.action_spaces[agent]
-
+        return self._action_spaces[agent]
+    
     def get_state_dim(self):
         """返回全局状态维度"""
         return self.state_dim
@@ -135,21 +130,29 @@ class MultiUAVEnv(ParallelEnv):
         """返回观测维度"""
         return self.obs_dim
     
+    def seed(self, seed=None):
+        """设置随机种子"""
+        self.seed_val = seed
+        if seed is not None:
+            self.np_random = np.random.RandomState(seed)
+        return [seed]
+    
     def reset(self, seed=None, options=None):
         """
         重置环境
         
         返回:
-            observations: 所有智能体的观测字典
-            infos: 所有智能体的信息字典
+            state: 全局状态
+            observations: 所有智能体的观测
         """
         if seed is not None:
-            self.seed_val = seed
-            self.np_random = np.random.RandomState(seed)
+            self.seed(seed)
         
         # 重置环境状态
         self.current_step = 0
         self.agents = self.possible_agents.copy()
+        self._agent_selector = agent_selector(self.agents)
+        self.agent_selection = self._agent_selector.reset()
         
         # 初始化无人机位置
         self.uav_positions = np.zeros((self.n_uavs, 3))
@@ -170,56 +173,69 @@ class MultiUAVEnv(ParallelEnv):
         # 计算初始SINR和连接
         self._update_channel_state()
         
-        # 获取所有智能体的观测
-        observations = {}
-        infos = {}
+        # 初始化奖励和完成状态
+        self.rewards = {agent: 0 for agent in self.agents}
+        self._cumulative_rewards = {agent: 0 for agent in self.agents}
+        self.terminations = {agent: False for agent in self.agents}
+        self.truncations = {agent: False for agent in self.agents}
+        self.infos = {agent: {} for agent in self.agents}
         
-        for agent_idx, agent in enumerate(self.agents):
+        # 获取全局状态和所有智能体的观测
+        state = self._get_state()
+        observations = {}
+        for agent in self.agents:
             observations[agent] = self._get_observation(agent)
-            infos[agent] = {}
+        
+        # 转换为HMASD所需的格式
+        state_array = state
+        obs_array = np.array([observations[agent]["obs"] for agent in self.agents])
         
         # 如果在渲染模式下，初始化渲染
         if self.render_mode == "human":
             self._render_frame()
         
-        return observations, infos
+        return state_array, obs_array
     
     def step(self, actions):
         """
         执行环境步骤
         
         参数:
-            actions: 所有智能体的动作字典 {agent_id: action}
+            actions: 所有智能体的动作 [n_uavs, 3]
             
         返回:
-            observations: 所有智能体的下一个观测字典
-            rewards: 所有智能体的奖励字典
-            terminations: 所有智能体的终止状态字典
-            truncations: 所有智能体的截断状态字典
-            infos: 所有智能体的信息字典
+            next_state: 下一个全局状态
+            next_observations: 所有智能体的下一个观测
+            reward: 全局奖励
+            done: 是否结束
+            info: 额外信息
         """
+        # 检查是否已经结束
+        if self.terminations[self.agent_selection] or self.truncations[self.agent_selection]:
+            self._was_dead_step(action=None)
+            return
+        
         # 更新所有无人机位置
-        for agent_idx, agent in enumerate(self.agents):
-            if agent in actions:
-                # 将归一化动作转换为实际速度
-                velocity = actions[agent] * self.max_speed
-                
-                # 更新位置
-                new_position = self.uav_positions[agent_idx] + velocity * self.time_step
-                
-                # 边界检查
-                new_position[0] = np.clip(new_position[0], 0, self.area_size)
-                new_position[1] = np.clip(new_position[1], 0, self.area_size)
-                new_position[2] = np.clip(new_position[2], *self.height_range)
-                
-                # 更新位置
-                self.uav_positions[agent_idx] = new_position
+        for i, agent in enumerate(self.agents):
+            # 将归一化动作转换为实际速度
+            velocity = actions[i] * self.max_speed
+            
+            # 更新位置
+            new_position = self.uav_positions[i] + velocity * self.time_step
+            
+            # 边界检查
+            new_position[0] = np.clip(new_position[0], 0, self.area_size)
+            new_position[1] = np.clip(new_position[1], 0, self.area_size)
+            new_position[2] = np.clip(new_position[2], *self.height_range)
+            
+            # 更新位置
+            self.uav_positions[i] = new_position
         
         # 更新信道状态和连接
         self._update_channel_state()
         
         # 计算奖励
-        global_reward = self._compute_reward()
+        reward = self._compute_reward()
         
         # 更新步数
         self.current_step += 1
@@ -227,40 +243,46 @@ class MultiUAVEnv(ParallelEnv):
         # 检查是否达到最大步数
         done = self.current_step >= self.max_steps
         
-        # 准备返回值
-        observations = {}
-        rewards = {}
-        terminations = {}
-        truncations = {}
-        infos = {}
-        
-        # 为每个智能体填充返回值
-        for agent_idx, agent in enumerate(self.agents):
-            observations[agent] = self._get_observation(agent)
-            rewards[agent] = global_reward / self.n_uavs  # 平均分配奖励
-            terminations[agent] = done
-            truncations[agent] = False
-            infos[agent] = {
-                "connections": self.connections[agent_idx],
-                "sinr_matrix": self.sinr_matrix[agent_idx],
-                "served_users": np.sum(self.connections[agent_idx])
-            }
-        
-        # 添加全局信息
-        global_info = {
-            "connections": self.connections,
-            "sinr_matrix": self.sinr_matrix,
-            "served_users": np.sum(self.connections)
-        }
-        
+        # 更新智能体状态
         for agent in self.agents:
-            infos[agent].update({"global": global_info})
+            self.rewards[agent] = reward / self.n_uavs  # 平均分配奖励
+            self.terminations[agent] = done
+            self.truncations[agent] = False
+        
+        # 获取下一个全局状态和所有智能体的观测
+        next_state = self._get_state()
+        next_observations = {}
+        for agent in self.agents:
+            next_observations[agent] = self._get_observation(agent)
+        
+        # 转换为HMASD所需的格式
+        next_state_array = next_state
+        next_obs_array = np.array([next_observations[agent]["obs"] for agent in self.agents])
         
         # 如果在渲染模式下，更新渲染
         if self.render_mode == "human":
             self._render_frame()
         
-        return observations, rewards, terminations, truncations, infos
+        # 返回HMASD所需的格式
+        info = {
+            "connections": self.connections,
+            "sinr_matrix": self.sinr_matrix,
+            "served_users": np.sum(self.connections)
+        }
+        
+        return next_state_array, next_obs_array, reward, done, info
+    
+    def observe(self, agent):
+        """
+        获取指定智能体的观测
+        
+        参数:
+            agent: 智能体ID
+            
+        返回:
+            observation: 智能体的观测
+        """
+        return self._get_observation(agent)
     
     def _get_state(self):
         """
@@ -401,21 +423,10 @@ class MultiUAVEnv(ParallelEnv):
         返回:
             path_loss: 路径损耗 (dB)
         """
-        # 检查 user_pos 是否为整数索引，如果是则获取对应的用户位置
-        if isinstance(user_pos, (int, np.integer)):
-            user_pos = self.user_positions[user_pos]
-            
         # 计算3D距离和2D距离
-        # 确保 user_pos 是二维的 (x, y)
-        if len(user_pos) > 2:
-            user_pos_2d = user_pos[:2]  # 如果是三维的，取前两个元素
-            user_pos_3d = user_pos  # 已经是三维的
-        else:
-            user_pos_2d = user_pos  # 已经是二维的
-            user_pos_3d = np.append(user_pos, 0)  # 假设用户在地面
-            
+        user_pos_3d = np.append(user_pos, 0)  # 假设用户在地面
         distance_3d = self._compute_distance(uav_pos, user_pos_3d)
-        distance_2d = np.sqrt(np.sum((uav_pos[:2] - user_pos_2d) ** 2))
+        distance_2d = np.sqrt(np.sum((uav_pos[:2] - user_pos) ** 2))
         height = uav_pos[2]
         
         # 计算仰角 (度)
@@ -495,16 +506,8 @@ class MultiUAVEnv(ParallelEnv):
         返回:
             sinr: SINR值 (dB)
         """
-        # 检查索引并获取位置
-        if isinstance(uav_idx, (int, np.integer)):
-            uav_pos = self.uav_positions[uav_idx]
-        else:
-            uav_pos = uav_idx  # 假设已经是位置
-            
-        if isinstance(user_idx, (int, np.integer)):
-            user_pos = self.user_positions[user_idx]
-        else:
-            user_pos = user_idx  # 假设已经是位置
+        uav_pos = self.uav_positions[uav_idx]
+        user_pos = self.user_positions[user_idx]
         
         # 计算路径损耗
         path_loss = self._compute_path_loss(uav_pos, user_pos)

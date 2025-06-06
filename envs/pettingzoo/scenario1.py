@@ -19,7 +19,7 @@ class UAVBaseStationEnv(MultiUAVEnv):
         height_range=(50, 150),
         max_speed=30,
         time_step=1.0,
-        max_steps=500,
+        max_steps=5000,
         user_distribution="uniform",
         channel_model="free_space",
         render_mode=None,
@@ -160,25 +160,28 @@ class UAVBaseStationEnv(MultiUAVEnv):
         执行环境步骤
         
         参数:
-            actions: 所有智能体的动作 [n_uavs, 3]
+            actions: 所有智能体的动作字典 {agent_id: action}
             
         返回:
-            next_state: 下一个全局状态
-            next_observations: 所有智能体的下一个观测
-            reward: 全局奖励
-            done: 是否结束
-            info: 额外信息
+            observations: 所有智能体的下一个观测字典
+            rewards: 所有智能体的奖励字典
+            terminations: 所有智能体的终止状态字典
+            truncations: 所有智能体的截断状态字典
+            infos: 所有智能体的信息字典
         """
-        next_state, next_observations, reward, done, info = super().step(actions)
+        observations, rewards, terminations, truncations, infos = super().step(actions)
         
-        # 添加场景特定信息
-        info.update({
+        # 添加场景特定信息到每个智能体的info中
+        scenario_info = {
             "scenario": "base_station",
             "reward_info": self.reward_info if hasattr(self, "reward_info") else {},
             "coverage_ratio": np.sum(self.connections) / self.n_users,
-        })
+        }
         
-        return next_state, next_observations, reward, done, info
+        for agent in self.agents:
+            infos[agent].update(scenario_info)
+        
+        return observations, rewards, terminations, truncations, infos
     
     def _render_frame(self):
         """渲染单帧"""

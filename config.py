@@ -43,6 +43,7 @@ class Config:
     # 训练参数
     buffer_size = 1024       # 经验回放缓冲区大小
     batch_size = 128         # 批处理大小
+    high_level_batch_size = 16  # 高层更新的批处理大小（较小值使高层网络能在早期开始更新）
     num_envs = 16            # 并行环境数量
     total_timesteps = 5e6    # 总时间步数
     eval_interval = 1000     # 评估间隔
