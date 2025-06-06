@@ -1,0 +1,16 @@
+开始测试，日志保存在 test_log_20250504_233437.txt
+======= 多无人机基站环境测试 =======
+
+=== 测试场景1：无人机基站环境 ===
+状态维度: (50,)
+观测维度: (3, 53)
+场景1测试失败: can't multiply sequence by non-int of type 'float'
+
+=== 测试场景2：无人机协作组网环境 ===
+场景2测试失败: 'UAVCooperativeNetworkEnv' object has no attribute 'n_ground_bs'
+
+======= 测试结果 =======
+场景1: 失败
+场景2: 失败
+
+部分测试失败，请查看错误信息。
