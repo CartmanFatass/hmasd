@@ -93,14 +93,30 @@ class EnhancedRewardTracker:
                         'value': comp_value
                     })
         
-        # 记录额外信息
+        # 记录额外信息（修正字段名映射）
         if info:
-            if 'served_users' in info:
+            # 修正：从reward_info中获取connected_users，或者从coverage_ratio计算
+            served_users = 0
+            total_users = 0
+            
+            if 'reward_info' in info and 'connected_users' in info['reward_info']:
+                served_users = info['reward_info']['connected_users']
+            elif 'coverage_ratio' in info and 'n_users' in info:
+                # 从覆盖率计算服务用户数
+                served_users = int(info['coverage_ratio'] * info['n_users'])
+                total_users = info['n_users']
+            elif 'served_users' in info:
+                # 兼容原有字段名
+                served_users = info['served_users']
+                total_users = info.get('total_users', 0)
+            
+            # 如果获取到了服务用户信息，记录到性能指标
+            if served_users > 0 or total_users > 0:
                 self.performance_metrics['served_users'].append({
                     'step': step,
                     'env_id': env_id,
-                    'served_users': info['served_users'],
-                    'total_users': info.get('total_users', 0)
+                    'served_users': served_users,
+                    'total_users': total_users
                 })
             
             # 记录吞吐量信息（修正后的字段名）
@@ -176,7 +192,8 @@ class EnhancedRewardTracker:
         if step - self.last_export_step < self.export_interval:
             return
         
-        export_dir = os.path.join(self.log_dir, 'paper_data')
+        #export_dir = os.path.join(self.log_dir, 'paper_data')
+        export_dir = '../autodl-tmp/paper_data'
         os.makedirs(export_dir, exist_ok=True)
         
         # 导出奖励数据
@@ -583,7 +600,7 @@ def parse_args():
     parser.add_argument('--mode', type=str, default='train', help='运行模式: train或eval')
     parser.add_argument('--scenario', type=int, default=2, help='场景: 1=基站模式, 2=协作组网模式')
     parser.add_argument('--model_path', type=str, default='models/hmasd_enhanced_tracking.pt', help='模型保存/加载路径')
-    parser.add_argument('--log_dir', type=str, default='logs', help='日志目录')
+    parser.add_argument('--log_dir', type=str, default='../tf-logs', help='日志目录')
     parser.add_argument('--log_level', type=str, default='info', 
                         choices=['debug', 'info', 'warning', 'error', 'critical'], 
                         help='日志级别')
@@ -731,17 +748,21 @@ def train(vec_env, eval_vec_env, config, args, device):
             env_reward_components[i]['team_disc_component'] += team_disc_component
             env_reward_components[i]['ind_disc_component'] += ind_disc_component
             
-            # 记录到奖励追踪器
+            # 始终记录基础性能数据，detailed_logging只影响奖励组成部分的记录
+            reward_components_to_log = None
             if args.detailed_logging:
-                reward_tracker.log_training_step(
-                    total_steps, i, current_reward,
-                    reward_components={
-                        'env_component': env_component,
-                        'team_disc_component': team_disc_component,
-                        'ind_disc_component': ind_disc_component
-                    },
-                    info=infos[i]  # 传递完整的info，包含reward_info
-                )
+                reward_components_to_log = {
+                    'env_component': env_component,
+                    'team_disc_component': team_disc_component,
+                    'ind_disc_component': ind_disc_component
+                }
+            
+            # 记录到奖励追踪器（始终记录性能数据）
+            reward_tracker.log_training_step(
+                total_steps, i, current_reward,
+                reward_components=reward_components_to_log,
+                info=infos[i]  # 传递完整的info，包含reward_info
+            )
             
             # 记录技能使用
             reward_tracker.log_skill_usage(
@@ -807,10 +828,40 @@ def train(vec_env, eval_vec_env, config, args, device):
                         agent.writer.add_scalar(f'Training/Episode_{comp_name}', comp_value, n_episodes)
                         agent.writer.add_scalar(f'Training/Episode_{comp_name}_Proportion', comp_value/total_intrinsic, n_episodes)
 
-                # 获取吞吐量信息（修正后的字段名）
-                system_throughput = 0
-                if 'reward_info' in infos[i] and 'system_throughput_mbps' in infos[i]['reward_info']:
-                    system_throughput = infos[i]['reward_info']['system_throughput_mbps']
+                # 实时记录性能指标到TensorBoard（立即记录，不等待导出间隔）
+                if 'reward_info' in infos[i]:
+                    reward_info = infos[i]['reward_info']
+                    
+                    # 系统吞吐量
+                    if 'system_throughput_mbps' in reward_info:
+                        system_throughput = reward_info['system_throughput_mbps']
+                        agent.writer.add_scalar('Performance/Episode_System_Throughput_Mbps', system_throughput, n_episodes)
+                    else:
+                        system_throughput = 0
+                    
+                    # 平均用户吞吐量
+                    if 'avg_throughput_per_user_mbps' in reward_info:
+                        avg_user_throughput = reward_info['avg_throughput_per_user_mbps']
+                        agent.writer.add_scalar('Performance/Episode_Avg_User_Throughput_Mbps', avg_user_throughput, n_episodes)
+                    
+                    # 连接用户数
+                    if 'connected_users' in reward_info:
+                        connected_users = reward_info['connected_users']
+                        agent.writer.add_scalar('Performance/Episode_Connected_Users', connected_users, n_episodes)
+                    
+                    # 连通性比率
+                    if 'connectivity_ratio' in reward_info:
+                        connectivity_ratio = reward_info['connectivity_ratio']
+                        agent.writer.add_scalar('Performance/Episode_Connectivity_Ratio', connectivity_ratio, n_episodes)
+                else:
+                    system_throughput = 0
+                
+                # 从episode_info获取性能数据并记录
+                if 'served_users' in episode_info:
+                    agent.writer.add_scalar('Performance/Episode_Served_Users', episode_info['served_users'], n_episodes)
+                
+                if 'coverage_ratio' in episode_info:
+                    agent.writer.add_scalar('Performance/Episode_Coverage_Ratio', episode_info['coverage_ratio'], n_episodes)
                 
                 main_logger.info(f"Episode结束 - 环境ID: {i}, Episode编号: {n_episodes}, "
                                f"总奖励: {env_rewards[i]:.2f}, 步数: {env_steps[i]}, "
