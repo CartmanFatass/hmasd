@@ -620,24 +620,52 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
         connectivity_ratio = self._compute_connectivity_ratio()
         connectivity_reward = connectivity_ratio
         
-        # 【新增】吞吐量奖励
-        total_throughput = 0
-        max_possible_throughput = 0
+        # 【修正】考虑回程瓶颈的系统吞吐量计算
+        system_throughput = 0
+        max_possible_system_throughput = 0
         
+        # 按UAV计算有效吞吐量（考虑回程瓶颈）
         for i in range(self.n_uavs):
+            # 计算该UAV服务的所有用户的总需求吞吐量
+            uav_user_throughput = 0
+            uav_max_possible_throughput = 0
+            
             for j in range(self.n_users):
-                # 计算实际有效吞吐量
                 if self.connections[i, j]:
-                    actual_throughput = self._compute_effective_throughput(i, j)
-                    total_throughput += actual_throughput
+                    # 计算前端链路吞吐量（UAV到用户）
+                    user_throughput = self._compute_throughput(i, j)
+                    uav_user_throughput += user_throughput
                 
-                # 计算理论最大吞吐量（假设完美信道条件：30dB SINR）
+                # 计算理论最大前端链路吞吐量
                 max_sinr_linear = 10 ** (30 / 10)  # 30dB转换为线性
                 max_link_throughput = self.bandwidth * np.log2(1 + max_sinr_linear)
-                max_possible_throughput += max_link_throughput
+                uav_max_possible_throughput += max_link_throughput
+            
+            # 获取该UAV的回程容量限制
+            if i in self.routing_paths:
+                backhaul_capacity = self._compute_backhaul_capacity(i)
+                
+                # 考虑多跳效率损失
+                path = self.routing_paths[i]
+                hop_count = len(path)
+                hop_efficiency = 1.0 / hop_count if hop_count > 0 else 0
+                
+                # 有效回程容量
+                effective_backhaul = backhaul_capacity * hop_efficiency
+                
+                # 实际有效吞吐量 = min(前端总需求, 有效回程容量)
+                uav_effective_throughput = min(uav_user_throughput, effective_backhaul)
+            else:
+                # 无回程路径，吞吐量为0
+                uav_effective_throughput = 0
+            
+            # 累加到系统总吞吐量
+            system_throughput += uav_effective_throughput
+            max_possible_system_throughput += min(uav_max_possible_throughput, 
+                                                  self.bandwidth * np.log2(1 + 10**(30/10)))  # 单UAV理论最大回程容量
         
         # 归一化吞吐量奖励
-        throughput_reward = total_throughput / max_possible_throughput if max_possible_throughput > 0 else 0
+        throughput_reward = system_throughput / max_possible_system_throughput if max_possible_system_throughput > 0 else 0
         
         # 跳数惩罚：路径越长，惩罚越大
         total_hops = 0
@@ -656,7 +684,7 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
             hop_penalty
         )
         
-        # 记录奖励组成
+        # 记录奖励组成（修正后的数据）
         self.reward_info = {
             "coverage_reward": coverage_reward,
             "quality_reward": quality_reward,
@@ -664,8 +692,12 @@ class UAVCooperativeNetworkEnv(MultiUAVEnv):
             "throughput_reward": throughput_reward,
             "hop_penalty": hop_penalty,
             "total_reward": reward,
-            "total_throughput_mbps": total_throughput / 1e6,  # 转换为Mbps
-            "avg_throughput_per_user_mbps": (total_throughput / max(connected_users, 1)) / 1e6
+            "system_throughput_mbps": system_throughput / 1e6,  # 系统实际吞吐量（考虑回程瓶颈）
+            "avg_throughput_per_user_mbps": (system_throughput / max(connected_users, 1)) / 1e6,
+            # 额外的调试信息
+            "connected_users": connected_users,
+            "connectivity_ratio": connectivity_ratio,
+            "avg_hops": avg_hops
         }
         
         return reward

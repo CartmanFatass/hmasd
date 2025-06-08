@@ -103,14 +103,14 @@ class EnhancedRewardTracker:
                     'total_users': info.get('total_users', 0)
                 })
             
-            # 记录吞吐量信息（新增）
+            # 记录吞吐量信息（修正后的字段名）
             if 'reward_info' in info:
                 reward_info = info['reward_info']
-                if 'total_throughput_mbps' in reward_info:
+                if 'system_throughput_mbps' in reward_info:
                     self.performance_metrics['total_throughput'].append({
                         'step': step,
                         'env_id': env_id,
-                        'total_throughput_mbps': reward_info['total_throughput_mbps'],
+                        'system_throughput_mbps': reward_info['system_throughput_mbps'],
                         'timestamp': time.time()
                     })
                 
@@ -435,34 +435,35 @@ class EnhancedRewardTracker:
                 writer.add_scalar('Performance/Throughput_Std_100steps', throughput_std, step)
                 writer.add_scalar('Performance/Throughput_CV_100steps', throughput_cv, step)
         
-        # 总吞吐量统计（新增）
+        # 系统吞吐量统计（修正后）
         if self.performance_metrics['total_throughput']:
-            # 计算最近100步的总吞吐量统计
+            # 计算最近100步的系统吞吐量统计
             recent_throughput_data = self.performance_metrics['total_throughput'][-100:]
-            recent_total_throughput = [t['total_throughput_mbps'] for t in recent_throughput_data]
+            recent_system_throughput = [t['system_throughput_mbps'] for t in recent_throughput_data if 'system_throughput_mbps' in t]
             
-            if recent_total_throughput:
-                # 平均总吞吐量
-                avg_total_throughput = np.mean(recent_total_throughput)
-                writer.add_scalar('Performance/Total_Throughput_Mbps_100steps', avg_total_throughput, step)
+            if recent_system_throughput:
+                # 平均系统吞吐量
+                avg_system_throughput = np.mean(recent_system_throughput)
+                writer.add_scalar('Performance/System_Throughput_Mbps_100steps', avg_system_throughput, step)
                 
-                # 总吞吐量标准差
-                throughput_std = np.std(recent_total_throughput)
-                writer.add_scalar('Performance/Total_Throughput_Std_100steps', throughput_std, step)
+                # 系统吞吐量标准差
+                throughput_std = np.std(recent_system_throughput)
+                writer.add_scalar('Performance/System_Throughput_Std_100steps', throughput_std, step)
                 
-                # 总吞吐量最大值和最小值
-                writer.add_scalar('Performance/Total_Throughput_Max_100steps', np.max(recent_total_throughput), step)
-                writer.add_scalar('Performance/Total_Throughput_Min_100steps', np.min(recent_total_throughput), step)
+                # 系统吞吐量最大值和最小值
+                writer.add_scalar('Performance/System_Throughput_Max_100steps', np.max(recent_system_throughput), step)
+                writer.add_scalar('Performance/System_Throughput_Min_100steps', np.min(recent_system_throughput), step)
                 
-                # 按环境分别统计总吞吐量
-                env_total_throughputs = defaultdict(list)
+                # 按环境分别统计系统吞吐量
+                env_system_throughputs = defaultdict(list)
                 for entry in recent_throughput_data:
-                    env_total_throughputs[entry['env_id']].append(entry['total_throughput_mbps'])
+                    if 'system_throughput_mbps' in entry:
+                        env_system_throughputs[entry['env_id']].append(entry['system_throughput_mbps'])
                 
-                for env_id, throughput_values in env_total_throughputs.items():
+                for env_id, throughput_values in env_system_throughputs.items():
                     if throughput_values:
                         env_avg_throughput = np.mean(throughput_values)
-                        writer.add_scalar(f'Performance/Env_{env_id}_Total_Throughput_Mbps', env_avg_throughput, step)
+                        writer.add_scalar(f'Performance/Env_{env_id}_System_Throughput_Mbps', env_avg_throughput, step)
         
         # 平均用户吞吐量统计（新增）
         if self.performance_metrics['avg_throughput_per_user']:
@@ -806,11 +807,16 @@ def train(vec_env, eval_vec_env, config, args, device):
                         agent.writer.add_scalar(f'Training/Episode_{comp_name}', comp_value, n_episodes)
                         agent.writer.add_scalar(f'Training/Episode_{comp_name}_Proportion', comp_value/total_intrinsic, n_episodes)
 
+                # 获取吞吐量信息（修正后的字段名）
+                system_throughput = 0
+                if 'reward_info' in infos[i] and 'system_throughput_mbps' in infos[i]['reward_info']:
+                    system_throughput = infos[i]['reward_info']['system_throughput_mbps']
+                
                 main_logger.info(f"Episode结束 - 环境ID: {i}, Episode编号: {n_episodes}, "
                                f"总奖励: {env_rewards[i]:.2f}, 步数: {env_steps[i]}, "
                                f"服务用户: {episode_info.get('served_users', 0)}/{episode_info.get('total_users', 0)}, "
                                f"覆盖率: {episode_info.get('coverage_ratio', 0):.2%}, "
-                               f"吞吐量: {episode_info.get('total_throughput_mbps', 0):.2f}Mbps")
+                               f"系统吞吐量: {system_throughput:.2f}Mbps")
 
                 # 重置环境状态跟踪
                 env_steps[i] = 0
