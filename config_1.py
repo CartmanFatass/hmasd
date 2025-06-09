@@ -45,7 +45,7 @@ class Config:
     batch_size = 128         # 批处理大小
     high_level_batch_size = 128  # 高层更新的批处理大小
     num_envs = 32            # 并行环境数量 (论文中rollout threads为32)
-    total_timesteps = 3e6 #4e6    # 总时间步数 (论文中SMAC为2e6)
+    total_timesteps = 4e6 #4e6    # 总时间步数 (论文中SMAC为2e6)
     eval_interval = 160000   # 评估间隔 (32并行环境 * 每环境5000步)
     episode_length = 5000    # 每个episode的最大长度 (基于观察到的实际行为)
     eval_episodes = 4      # 评估时的episode数量 (论文中SMAC为100)

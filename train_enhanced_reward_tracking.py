@@ -190,7 +190,7 @@ class EnhancedRewardTracker:
     def export_training_data(self, step, writer=None):
         """导出训练数据用于论文分析"""
         if step - self.last_export_step < self.export_interval:
-            return
+            return    
         
         #export_dir = os.path.join(self.log_dir, 'paper_data')
         export_dir = '../autodl-tmp/paper_data'
