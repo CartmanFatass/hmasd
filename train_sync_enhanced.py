@@ -318,10 +318,16 @@ def train_sync(vec_env, eval_vec_env, config, args, device):
             all_info_list = []
             
             for i in range(config.num_envs):
-                # 为每个环境获取动作
+                # 修复：让agent内部完全管理技能计时器，不再传递外部计算的时间步
+                # 只传递环境步数，agent内部会管理技能重置逻辑
                 actions, agent_info = agent.step(states[i], observations[i], env_steps[i], env_id=i)
                 all_actions_list.append(actions)
                 all_info_list.append(agent_info)
+                
+                # 记录技能重置信息
+                if agent_info.get('skill_changed', False):
+                    main_logger.debug(f"环境{i}: 技能已重置, timer={agent_info.get('skill_timer', 0)}, "
+                                    f"team_skill={agent_info.get('team_skill')}")
             
             # 执行环境步骤
             next_states = []

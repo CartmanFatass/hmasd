@@ -170,9 +170,32 @@ class HMASDAgent:
         self.collection_enabled = False
         main_logger.debug(f"数据收集已禁用，策略版本: {self.policy_version}")
     
+    def force_collect_pending_high_level_experiences(self):
+        """
+        在同步更新前强制收集所有未完成技能周期的高层经验
+        确保高层缓冲区有足够的样本进行更新
+        """
+        pending_collections = 0
+        
+        for env_id in range(32):  # 假设最多32个并行环境
+            timer = self.env_timers.get(env_id, 0)
+            reward_sum = self.env_reward_sums.get(env_id, 0.0)
+            
+            # 如果该环境有未完成的技能周期且累积奖励不为0，强制收集
+            if timer > 0 and timer < self.config.k - 1:
+                main_logger.info(f"强制收集环境{env_id}的高层经验: timer={timer}, 累积奖励={reward_sum:.4f}")
+                self.force_high_level_collection[env_id] = True
+                pending_collections += 1
+        
+        if pending_collections > 0:
+            main_logger.info(f"同步更新前强制收集了 {pending_collections} 个环境的pending高层经验")
+        
+        return pending_collections
+
     def sync_update(self):
         """
-        同步更新所有网络
+        改进的同步更新机制 - 基于HMASD论文算法
+        确保高层经验收集不受低层缓冲区清空影响
         
         返回:
             update_info: 更新信息字典
@@ -184,24 +207,67 @@ class HMASDAgent:
         samples_count = self.samples_collected_this_round
         main_logger.info(f"同步更新开始 - 收集了 {samples_count} 个样本，策略版本: {self.policy_version}")
         
-        # 3. 执行常规更新
-        update_info = self.update()
+        # 3. 【新增】强制收集所有pending的高层经验
+        pending_count = self.force_collect_pending_high_level_experiences()
         
-        # 4. 重置同步状态
+        # 4. 记录缓冲区状态
+        high_level_buffer_size_before = len(self.high_level_buffer)
+        low_level_buffer_size_before = len(self.low_level_buffer)
+        main_logger.info(f"同步更新前缓冲区状态 - 高层: {high_level_buffer_size_before}, 低层: {low_level_buffer_size_before}")
+        
+        # 5. 【修改顺序】先更新高层策略（使用现有的高层经验）
+        coordinator_loss, coordinator_policy_loss, coordinator_value_loss, team_skill_entropy, agent_skill_entropy, \
+        mean_coord_state_val, mean_coord_agent_val, mean_high_level_reward = self.update_coordinator()
+        
+        # 6. 再更新低层策略（会清空低层缓冲区）
+        discoverer_loss, discoverer_policy_loss, discoverer_value_loss, action_entropy, \
+        avg_intrinsic_reward, avg_env_comp, avg_team_disc_comp, avg_ind_disc_comp, \
+        avg_discoverer_val = self.update_discoverer()
+        
+        # 7. 最后更新判别器
+        discriminator_loss = self.update_discriminators()
+        
+        # 8. 记录缓冲区状态变化
+        high_level_buffer_size_after = len(self.high_level_buffer)
+        low_level_buffer_size_after = len(self.low_level_buffer)
+        main_logger.info(f"同步更新后缓冲区状态 - 高层: {high_level_buffer_size_after}, 低层: {low_level_buffer_size_after}")
+        
+        # 9. 重置同步状态
         self.policy_version += 1
         self.samples_collected_this_round = 0
         self.last_sync_step = self.global_step
         
-        # 5. 重新启用数据收集
+        # 10. 重新启用数据收集
         self.enable_data_collection()
         
-        # 6. 记录同步更新完成
+        # 11. 记录同步更新完成
         main_logger.info(f"同步更新完成 - 策略版本更新到: {self.policy_version}, 已重置样本计数")
         
-        # 7. 添加同步相关的统计信息
-        update_info['sync_samples_collected'] = samples_count
-        update_info['policy_version'] = self.policy_version
-        update_info['is_sync_update'] = True
+        # 12. 构建更新信息
+        update_info = {
+            'sync_samples_collected': samples_count,
+            'policy_version': self.policy_version,
+            'is_sync_update': True,
+            'pending_high_level_forced': pending_count,
+            'discriminator_loss': discriminator_loss,
+            'coordinator_loss': coordinator_loss,
+            'coordinator_policy_loss': coordinator_policy_loss,
+            'coordinator_value_loss': coordinator_value_loss,
+            'discoverer_loss': discoverer_loss,
+            'discoverer_policy_loss': discoverer_policy_loss,
+            'discoverer_value_loss': discoverer_value_loss,
+            'team_skill_entropy': team_skill_entropy,
+            'agent_skill_entropy': agent_skill_entropy,
+            'action_entropy': action_entropy,
+            'avg_intrinsic_reward': avg_intrinsic_reward,
+            'avg_env_comp': avg_env_comp,
+            'avg_team_disc_comp': avg_team_disc_comp,
+            'avg_ind_disc_comp': avg_ind_disc_comp,
+            'mean_coord_state_val': mean_coord_state_val,
+            'mean_coord_agent_val': mean_coord_agent_val,
+            'avg_discoverer_val': avg_discoverer_val,
+            'mean_high_level_reward': mean_high_level_reward
+        }
         
         return update_info
     
@@ -430,10 +496,12 @@ class HMASDAgent:
         返回:
             bool: 是否成功存储（同步模式下可能拒绝存储）
         """
-        # 同步模式检查：如果数据收集被禁用，则拒绝存储
+        # 修复：分离低层和高层经验的同步控制
+        # 低层经验受同步模式控制，高层经验始终允许存储以保证数据积累
+        low_level_collection_allowed = True
         if self.sync_mode and not self.collection_enabled:
-            main_logger.debug(f"同步模式：数据收集已禁用，跳过环境{env_id}的经验存储")
-            return False
+            low_level_collection_allowed = False
+            main_logger.debug(f"同步模式：低层数据收集已禁用，环境{env_id}只收集高层经验")
         
         n_agents = len(agent_skills)
         state_tensor = torch.FloatTensor(state).to(self.device)
@@ -460,48 +528,51 @@ class HMASDAgent:
             team_disc_log_probs = F.log_softmax(team_disc_logits, dim=-1)
             team_skill_log_prob = team_disc_log_probs[0, team_skill]
         
-        # 为每个智能体存储低层经验
-        for i in range(n_agents):
-            obs = torch.FloatTensor(observations[i]).to(self.device)
-            next_obs = torch.FloatTensor(next_observations[i]).to(self.device)
-            action = torch.FloatTensor(actions[i]).to(self.device)
-            done = dones[i] if isinstance(dones, list) else dones
-            
-            # 计算个体技能判别器输出
-            with torch.no_grad():
-                agent_disc_logits = self.individual_discriminator(
-                    next_obs.unsqueeze(0), 
-                    team_skill_tensor
-                )
-                agent_disc_log_probs = F.log_softmax(agent_disc_logits, dim=-1)
-                agent_skill_log_prob = agent_disc_log_probs[0, agent_skills[i]]
+        # 为每个智能体存储低层经验（仅在数据收集允许时）
+        if low_level_collection_allowed:
+            for i in range(n_agents):
+                obs = torch.FloatTensor(observations[i]).to(self.device)
+                next_obs = torch.FloatTensor(next_observations[i]).to(self.device)
+                action = torch.FloatTensor(actions[i]).to(self.device)
+                done = dones[i] if isinstance(dones, list) else dones
                 
-            # 计算低层奖励（Eq. 4）及其组成部分
-            env_reward_component = self.config.lambda_e * current_reward # 使用 current_reward
-            team_disc_component = self.config.lambda_D * team_skill_log_prob.item()
-            ind_disc_component = self.config.lambda_d * agent_skill_log_prob.item()
-            
-            intrinsic_reward = env_reward_component + team_disc_component + ind_disc_component
-            
-            # 存储低层经验
-            low_level_experience = (
-                state_tensor,                           # 全局状态s
-                team_skill_tensor,                      # 团队技能Z
-                obs,                                    # 智能体观测o_i
-                torch.tensor(agent_skills[i], device=self.device),  # 个体技能z_i
-                action,                                 # 动作a_i
-                torch.tensor(intrinsic_reward, device=self.device),  # 总内在奖励r_i
-                torch.tensor(done, dtype=torch.float, device=self.device),  # 是否结束
-                torch.tensor(action_logprobs[i], device=self.device),  # 动作对数概率
-                torch.tensor(env_reward_component, device=self.device), # 环境奖励部分
-                torch.tensor(team_disc_component, device=self.device),  # 团队判别器部分
-                torch.tensor(ind_disc_component, device=self.device)   # 个体判别器部分
-            )
-            self.low_level_buffer.push(low_level_experience)
-            
-            # 在同步模式下，增加样本计数
-            if self.sync_mode:
-                self.samples_collected_this_round += 1
+                # 计算个体技能判别器输出
+                with torch.no_grad():
+                    agent_disc_logits = self.individual_discriminator(
+                        next_obs.unsqueeze(0), 
+                        team_skill_tensor
+                    )
+                    agent_disc_log_probs = F.log_softmax(agent_disc_logits, dim=-1)
+                    agent_skill_log_prob = agent_disc_log_probs[0, agent_skills[i]]
+                    
+                # 计算低层奖励（Eq. 4）及其组成部分
+                env_reward_component = self.config.lambda_e * current_reward # 使用 current_reward
+                team_disc_component = self.config.lambda_D * team_skill_log_prob.item()
+                ind_disc_component = self.config.lambda_d * agent_skill_log_prob.item()
+                
+                intrinsic_reward = env_reward_component + team_disc_component + ind_disc_component
+                
+                # 存储低层经验
+                low_level_experience = (
+                    state_tensor,                           # 全局状态s
+                    team_skill_tensor,                      # 团队技能Z
+                    obs,                                    # 智能体观测o_i
+                    torch.tensor(agent_skills[i], device=self.device),  # 个体技能z_i
+                    action,                                 # 动作a_i
+                    torch.tensor(intrinsic_reward, device=self.device),  # 总内在奖励r_i
+                    torch.tensor(done, dtype=torch.float, device=self.device),  # 是否结束
+                    torch.tensor(action_logprobs[i], device=self.device),  # 动作对数概率
+                    torch.tensor(env_reward_component, device=self.device), # 环境奖励部分
+                    torch.tensor(team_disc_component, device=self.device),  # 团队判别器部分
+                    torch.tensor(ind_disc_component, device=self.device)   # 个体判别器部分
+                )
+                self.low_level_buffer.push(low_level_experience)
+                
+                # 在同步模式下，增加样本计数
+                if self.sync_mode:
+                    self.samples_collected_this_round += 1
+        else:
+            main_logger.debug(f"环境{env_id}: 跳过低层经验存储（同步模式数据收集已禁用）")
             
         # 存储技能判别器训练数据
         observations_tensor = torch.FloatTensor(next_observations).to(self.device)
@@ -547,6 +618,10 @@ class HMASDAgent:
         # 存储高层经验（每k步一次或者环境终止时）
         # 简化存储条件：每当达到k-1步或环境终止或强制收集时，都存储高层经验
         should_store_high_level = (skill_timer == self.config.k - 1) or dones or force_collection
+        
+        # 增强调试日志：记录存储条件检查
+        main_logger.debug(f"高层存储检查: env_id={env_id}, skill_timer={skill_timer}, k-1={self.config.k-1}, "
+                         f"dones={dones}, force_collection={force_collection}, should_store={should_store_high_level}")
         
         if should_store_high_level:
             # 获取当前环境的累积奖励
@@ -612,7 +687,7 @@ class HMASDAgent:
             
             # 每收集5个样本记录一次统计信息（从10改为5，增加反馈频率）
             if self.high_level_samples_total % 5 == 0:
-                main_logger.debug(f"高层经验统计 - 总样本: {self.high_level_samples_total}, 环境贡献: {self.high_level_samples_by_env}, 原因统计: {self.high_level_samples_by_reason}")
+                main_logger.info(f"[HIGH_LEVEL_COLLECT] 高层经验统计 - 总样本: {self.high_level_samples_total}, 环境贡献: {self.high_level_samples_by_env}, 原因统计: {self.high_level_samples_by_reason}")
                 
                 # 记录到TensorBoard
                 if hasattr(self, 'writer'):
@@ -623,9 +698,9 @@ class HMASDAgent:
         
             # 增加日志以便跟踪高层经验添加状态
             current_buffer_size = len(self.high_level_buffer)
-            main_logger.debug(f"高层经验添加状态：环境ID={env_id}, step={self.global_step}, "
-                           f"当前缓冲区大小: {current_buffer_size}, 此环境累积奖励: {env_accumulated_reward:.4f}, "
-                           f"原因：{reason}")
+            main_logger.info(f"[HIGH_LEVEL_COLLECT] ✓ 高层经验已添加: 环境ID={env_id}, step={self.global_step}, "
+                           f"缓冲区大小: {current_buffer_size}/{self.config.high_level_batch_size}, "
+                           f"累积奖励: {env_accumulated_reward:.4f}, 原因: {reason}")
             
             # 将带有log probabilities的经验存储到专用缓冲区
             if log_probs is not None:
@@ -662,7 +737,7 @@ class HMASDAgent:
         # 记录高层缓冲区状态
         buffer_len = len(self.high_level_buffer)
         required_batch_size = self.config.high_level_batch_size
-        main_logger.debug(f"高层缓冲区状态: {buffer_len}/{required_batch_size} (当前/所需)")
+        main_logger.info(f"[BUFFER_STATUS] 高层缓冲区状态: {buffer_len}/{required_batch_size} (当前/所需)")
         
         if buffer_len < required_batch_size:
             # 如果缓冲区不足，使用计数器减少警告日志频率
@@ -670,7 +745,7 @@ class HMASDAgent:
             if buffer_len != self.last_high_level_buffer_size or self.high_level_buffer_warning_counter % 10 == 0:
                 main_logger.warning(f"高层缓冲区样本不足，需要{required_batch_size}个样本，但只有{buffer_len}个。跳过更新。")
             else:
-                main_logger.debug(f"高层缓冲区样本不足，需要{required_batch_size}个样本，但只有{buffer_len}个。跳过更新。")
+                main_logger.info(f"[BUFFER_STATUS] 高层缓冲区样本不足，需要{required_batch_size}个样本，但只有{buffer_len}个。跳过更新。")
             
             # 更新计数器和上次缓冲区大小
             self.high_level_buffer_warning_counter += 1
@@ -680,7 +755,7 @@ class HMASDAgent:
             return 0, 0, 0, 0, 0, 0, 0, 0
         
         # 缓冲区已满，继续更新
-        main_logger.debug(f"高层缓冲区满足更新条件，从{buffer_len}个样本中采样{required_batch_size}个")
+        main_logger.info(f"[HIGH_LEVEL_UPDATE] 高层缓冲区满足更新条件，从{buffer_len}个样本中采样{required_batch_size}个")
             
         # 从缓冲区采样数据
         batch = self.high_level_buffer.sample(self.config.high_level_batch_size)
@@ -697,7 +772,7 @@ class HMASDAgent:
         reward_std = rewards.std().item()
         reward_min = rewards.min().item()
         reward_max = rewards.max().item()
-        main_logger.debug(f"高层奖励统计: 均值={reward_mean:.4f}, 标准差={reward_std:.4f}, 最小值={reward_min:.4f}, 最大值={reward_max:.4f}")
+        main_logger.info(f"[HIGH_LEVEL_UPDATE] 高层奖励统计: 均值={reward_mean:.4f}, 标准差={reward_std:.4f}, 最小值={reward_min:.4f}, 最大值={reward_max:.4f}")
         
         # 获取当前状态价值
         state_values, agent_values = self.skill_coordinator.get_value(states, observations)

@@ -27,7 +27,7 @@ from hmasd.agent import HMASDAgent
 from envs.pettingzoo.scenario1 import UAVBaseStationEnv
 from envs.pettingzoo.scenario2 import UAVCooperativeNetworkEnv
 from envs.pettingzoo.env_adapter import ParallelToArrayAdapter
-from evaltools.eval_utils import evaluate_agent
+
 
 class SyncEnhancedRewardTracker:
     """同步训练增强的奖励追踪器，用于论文数据收集"""
@@ -507,6 +507,162 @@ def parse_args():
                         help='启用详细的奖励日志记录')
     
     return parser.parse_args()
+
+def evaluate_agent(agent, vec_env, config, num_episodes=10, render=False):
+    """
+    评估HMASD代理 - 同步训练增强版本
+    
+    参数:
+        agent: HMASD代理实例
+        vec_env: 向量化环境
+        config: 配置对象
+        num_episodes: 评估的episode数量
+        render: 是否渲染环境
+        
+    返回:
+        dict: 包含详细评估指标的字典
+    """
+    main_logger.info(f"开始评估代理: {num_episodes} episodes")
+    
+    num_envs = vec_env.num_envs
+    episode_rewards = []
+    episode_lengths = []
+    performance_metrics = {
+        'system_throughputs': [],
+        'connected_users': [],
+        'connectivity_ratios': [],
+        'avg_user_throughputs': []
+    }
+    
+    # 重置环境
+    try:
+        results = vec_env.env_method('reset')
+        observations = np.array([res[0] for res in results])
+        initial_infos = [res[1] for res in results]
+        states = np.array([info.get('state', np.zeros(agent.config.state_dim)) for info in initial_infos])
+    except Exception as e:
+        main_logger.error(f"重置评估环境失败: {e}")
+        return {
+            'mean_reward': 0.0,
+            'std_reward': 0.0,
+            'min_reward': 0.0,
+            'max_reward': 0.0,
+            'episode_lengths': [],
+            'performance_metrics': performance_metrics
+        }
+    
+    env_steps = np.zeros(num_envs, dtype=int)
+    env_rewards = np.zeros(num_envs)
+    completed_episodes = 0
+    
+    # 设置代理为评估模式
+    agent.eval_mode = True
+    
+    with torch.no_grad():
+        while completed_episodes < num_episodes:
+            try:
+                all_actions_list = []
+                
+                for i in range(num_envs):
+                    actions, agent_info = agent.step(
+                        states[i], observations[i], env_steps[i], 
+                        deterministic=True, env_id=i
+                    )
+                    all_actions_list.append(actions)
+                
+                actions_array = np.array(all_actions_list)
+                next_observations, rewards, dones, infos = vec_env.step(actions_array)
+                next_states = np.array([info.get('next_state', np.zeros(agent.config.state_dim)) for info in infos])
+                
+                for i in range(num_envs):
+                    env_steps[i] += 1
+                    env_rewards[i] += rewards[i]
+                    
+                    # 收集性能指标
+                    if 'reward_info' in infos[i]:
+                        reward_info = infos[i]['reward_info']
+                        
+                        if 'system_throughput_mbps' in reward_info:
+                            performance_metrics['system_throughputs'].append(reward_info['system_throughput_mbps'])
+                        
+                        if 'connected_users' in reward_info:
+                            performance_metrics['connected_users'].append(reward_info['connected_users'])
+                        
+                        if 'connectivity_ratio' in reward_info:
+                            performance_metrics['connectivity_ratios'].append(reward_info['connectivity_ratio'])
+                        
+                        if 'avg_throughput_per_user_mbps' in reward_info:
+                            performance_metrics['avg_user_throughputs'].append(reward_info['avg_throughput_per_user_mbps'])
+                    
+                    if dones[i] and completed_episodes < num_episodes:
+                        episode_rewards.append(env_rewards[i])
+                        episode_lengths.append(env_steps[i])
+                        completed_episodes += 1
+                        
+                        # 记录性能信息
+                        perf_info = ""
+                        if 'reward_info' in infos[i]:
+                            reward_info = infos[i]['reward_info']
+                            system_throughput = reward_info.get('system_throughput_mbps', 0)
+                            connected_users = reward_info.get('connected_users', 0)
+                            connectivity_ratio = reward_info.get('connectivity_ratio', 0)
+                            perf_info = f", 系统吞吐量: {system_throughput:.2f}Mbps, 连接用户: {connected_users}, 连通率: {connectivity_ratio:.2%}"
+                        
+                        main_logger.info(f"评估 Episode {completed_episodes}/{num_episodes}, "
+                                       f"奖励: {env_rewards[i]:.2f}, 步数: {env_steps[i]}{perf_info}")
+                        
+                        env_steps[i] = 0
+                        env_rewards[i] = 0
+                
+                states = next_states
+                observations = next_observations
+                
+                if completed_episodes >= num_episodes:
+                    break
+                    
+            except Exception as e:
+                main_logger.error(f"评估过程中出错: {e}")
+                break
+    
+    # 重置代理模式
+    agent.eval_mode = False
+    
+    # 计算统计指标
+    if episode_rewards:
+        mean_reward = np.mean(episode_rewards)
+        std_reward = np.std(episode_rewards)
+        min_reward = np.min(episode_rewards)
+        max_reward = np.max(episode_rewards)
+    else:
+        mean_reward = std_reward = min_reward = max_reward = 0.0
+    
+    # 计算性能指标的平均值
+    avg_performance_metrics = {}
+    for key, values in performance_metrics.items():
+        if values:
+            avg_performance_metrics[key.replace('s', '')] = np.mean(values)
+        else:
+            avg_performance_metrics[key.replace('s', '')] = 0.0
+    
+    # 构造返回结果
+    eval_results = {
+        'mean_reward': mean_reward,
+        'std_reward': std_reward,
+        'min_reward': min_reward,
+        'max_reward': max_reward,
+        'episode_lengths': episode_lengths,
+        'performance_metrics': avg_performance_metrics
+    }
+    
+    main_logger.info(f"评估完成: 平均奖励 {mean_reward:.4f} ± {std_reward:.4f}, "
+                   f"范围: [{min_reward:.4f}, {max_reward:.4f}]")
+    
+    if avg_performance_metrics.get('system_throughput', 0) > 0:
+        main_logger.info(f"性能指标: 系统吞吐量 {avg_performance_metrics['system_throughput']:.2f}Mbps, "
+                       f"连接用户 {avg_performance_metrics['connected_user']:.1f}, "
+                       f"连通率 {avg_performance_metrics['connectivity_ratio']:.2%}")
+    
+    return eval_results
 
 def train_sync_enhanced(vec_env, eval_vec_env, config, args, device):
     """

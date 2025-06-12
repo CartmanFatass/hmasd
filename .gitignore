@@ -42,6 +42,8 @@ logs/
 data/
 tf-logs/
 test/
+test*.py
+*.pdf
 
 # 生成的模型和结果
 models/

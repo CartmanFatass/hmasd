@@ -20,7 +20,6 @@ try:
     from hmasd.agent import HMASDAgent
     from envs.pettingzoo.scenario2 import UAVCooperativeNetworkEnv
     from envs.pettingzoo.env_adapter import ParallelToArrayAdapter
-    from evaltools.eval_utils import evaluate_agent
     from train_hmasd_sync_enhanced import SyncEnhancedRewardTracker, get_device
     IMPORTS_SUCCESSFUL = True
     IMPORT_ERROR = None
