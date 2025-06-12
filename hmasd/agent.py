@@ -47,6 +47,16 @@ class HMASDAgent:
         main_logger.debug(f"HMASDAgent.__init__: SummaryWriter created: {self.writer}")
         self.global_step = 0
         
+        # 同步训练控制机制
+        self.sync_mode = True                     # 启用同步训练模式
+        self.collection_enabled = True            # 数据收集开关
+        self.policy_version = 0                   # 策略版本号
+        self.sync_batch_size = config.batch_size  # 同步batch大小（从配置获取）
+        self.samples_collected_this_round = 0     # 本轮收集的样本数
+        self.last_sync_step = 0                   # 上次同步更新的步数
+        
+        main_logger.info(f"同步训练模式已启用，同步batch大小: {self.sync_batch_size}")
+        
         # 创建网络
         self.skill_coordinator = SkillCoordinator(config).to(self.device)
         self.skill_discoverer = SkillDiscoverer(config, logger=main_logger).to(self.device) # Pass logger
@@ -142,6 +152,58 @@ class HMASDAgent:
         self.cumulative_team_disc_reward = 0.0
         self.cumulative_ind_disc_reward = 0.0
         self.reward_component_counts = 0
+    
+    def should_sync_update(self):
+        """检查是否应该进行同步更新"""
+        if not self.sync_mode:
+            return False
+        
+        return self.samples_collected_this_round >= self.sync_batch_size
+    
+    def enable_data_collection(self):
+        """启用数据收集"""
+        self.collection_enabled = True
+        main_logger.debug(f"数据收集已启用，策略版本: {self.policy_version}")
+    
+    def disable_data_collection(self):
+        """禁用数据收集"""
+        self.collection_enabled = False
+        main_logger.debug(f"数据收集已禁用，策略版本: {self.policy_version}")
+    
+    def sync_update(self):
+        """
+        同步更新所有网络
+        
+        返回:
+            update_info: 更新信息字典
+        """
+        # 1. 停止数据收集
+        self.disable_data_collection()
+        
+        # 2. 记录同步更新信息
+        samples_count = self.samples_collected_this_round
+        main_logger.info(f"同步更新开始 - 收集了 {samples_count} 个样本，策略版本: {self.policy_version}")
+        
+        # 3. 执行常规更新
+        update_info = self.update()
+        
+        # 4. 重置同步状态
+        self.policy_version += 1
+        self.samples_collected_this_round = 0
+        self.last_sync_step = self.global_step
+        
+        # 5. 重新启用数据收集
+        self.enable_data_collection()
+        
+        # 6. 记录同步更新完成
+        main_logger.info(f"同步更新完成 - 策略版本更新到: {self.policy_version}, 已重置样本计数")
+        
+        # 7. 添加同步相关的统计信息
+        update_info['sync_samples_collected'] = samples_count
+        update_info['policy_version'] = self.policy_version
+        update_info['is_sync_update'] = True
+        
+        return update_info
     
     def reset_buffers(self):
         """重置所有经验缓冲区"""
@@ -348,7 +410,7 @@ class HMASDAgent:
                          actions, rewards, dones, team_skill, agent_skills, action_logprobs, log_probs=None, 
                          skill_timer_for_env=None, env_id=0):
         """
-        存储环境交互经验
+        存储环境交互经验（支持同步训练）
         
         参数:
             state: 全局状态 [state_dim]
@@ -364,7 +426,15 @@ class HMASDAgent:
             log_probs: 技能的log probabilities字典，包含'team_log_prob'和'agent_log_probs'
             skill_timer_for_env: 当前环境的技能计时器值，用于多环境并行训练
             env_id: 环境ID，用于多环境并行训练
+            
+        返回:
+            bool: 是否成功存储（同步模式下可能拒绝存储）
         """
+        # 同步模式检查：如果数据收集被禁用，则拒绝存储
+        if self.sync_mode and not self.collection_enabled:
+            main_logger.debug(f"同步模式：数据收集已禁用，跳过环境{env_id}的经验存储")
+            return False
+        
         n_agents = len(agent_skills)
         state_tensor = torch.FloatTensor(state).to(self.device)
         next_state_tensor = torch.FloatTensor(next_state).to(self.device)
@@ -428,6 +498,10 @@ class HMASDAgent:
                 torch.tensor(ind_disc_component, device=self.device)   # 个体判别器部分
             )
             self.low_level_buffer.push(low_level_experience)
+            
+            # 在同步模式下，增加样本计数
+            if self.sync_mode:
+                self.samples_collected_this_round += 1
             
         # 存储技能判别器训练数据
         observations_tensor = torch.FloatTensor(next_observations).to(self.device)
@@ -579,6 +653,9 @@ class HMASDAgent:
             # 如果不到技能周期结束时间，增加该环境的技能计时器，但确保不超过k-1
             if self.env_timers[env_id] < self.config.k - 1:
                 self.env_timers[env_id] += 1
+        
+        # 返回成功存储
+        return True
     
     def update_coordinator(self):
         """更新高层技能协调器网络"""
@@ -1156,6 +1233,11 @@ class HMASDAgent:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.skill_discoverer.parameters(), self.config.max_grad_norm)
         self.discoverer_optimizer.step()
+        
+        # 清空低层缓冲区，确保on-policy训练
+        buffer_size_before = len(self.low_level_buffer)
+        self.low_level_buffer.clear()
+        main_logger.info(f"底层策略更新完成，已清空low_level_buffer（之前大小: {buffer_size_before}）")
         
         # 计算内在奖励各部分的平均值
         avg_intrinsic_reward = rewards.mean().item()

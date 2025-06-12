@@ -34,7 +34,7 @@ class Config:
 
     # HMASD损失权重 - 基于论文Table 3中的3m场景
     # 注意：lambda_e参数已调整为100.0，与论文中一致
-    lambda_e = 100.0       # 外部奖励权重 (论文中3m场景为100)
+    lambda_e = 1.0       # 外部奖励权重 (论文中3m场景为100)
     lambda_D = 0.1           # 团队技能判别器奖励权重 (论文中3m场景为0.1)
     lambda_d = 0.5           # 个体技能判别器奖励权重 (论文中3m场景为0.5)
     lambda_h = 0.001         # 高层策略熵权重 (论文中3m场景为0.001)
@@ -42,7 +42,7 @@ class Config:
 
     # 训练参数 - 部分基于论文Table 1和Table 2
     buffer_size = 1024       # 经验回放缓冲区大小
-    batch_size = 128         # 批处理大小
+    batch_size = 1024        # 同步训练批处理大小 (32环境 × 32样本/环境)
     high_level_batch_size = 128  # 高层更新的批处理大小
     num_envs = 32            # 并行环境数量 (论文中rollout threads为32)
     total_timesteps = 4e6 #4e6    # 总时间步数 (论文中SMAC为2e6)
