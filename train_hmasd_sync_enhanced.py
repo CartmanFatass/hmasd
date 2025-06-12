@@ -5,13 +5,19 @@ HMASD同步训练脚本 - 增强奖励追踪版本
 确保严格的on-policy特性并提供详细的训练数据收集
 """
 
+# 在所有其他导入之前设置matplotlib后端，避免在多进程环境中使用GUI组件
 import os
+os.environ['MPLBACKEND'] = 'Agg'  # 设置环境变量
+import matplotlib
+matplotlib.use('Agg')  # 强制使用非交互式后端
+import matplotlib.pyplot as plt
+plt.ioff()  # 关闭交互模式
+
 import time
 import numpy as np
 import torch
 import argparse
 import logging
-import matplotlib.pyplot as plt
 from datetime import datetime
 import multiprocessing as mp
 import pandas as pd
@@ -276,81 +282,112 @@ class SyncEnhancedRewardTracker:
         main_logger.debug(f"已导出步骤 {step} 的训练数据到 {export_dir}")
     
     def generate_training_plots(self, export_dir, step):
-        """生成训练过程的可视化图表"""
+        """生成训练过程的可视化图表 - 优化的多进程安全版本"""
         
-        # 1. Episode奖励趋势图
-        if self.training_rewards['episode_rewards']:
-            episodes = [r['episode'] for r in self.training_rewards['episode_rewards']]
-            rewards = [r['total_reward'] for r in self.training_rewards['episode_rewards']]
+        try:
+            # 确保使用非交互式后端
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            plt.ioff()  # 确保交互模式关闭
             
-            plt.figure(figsize=(15, 10))
-            
-            # 原始奖励曲线
-            plt.subplot(2, 3, 1)
-            plt.plot(episodes, rewards, alpha=0.3, color='blue', label='Episode Rewards')
-            if len(rewards) >= 50:
-                window = min(50, len(rewards))
-                smoothed = pd.Series(rewards).rolling(window=window, center=True).mean()
-                plt.plot(episodes, smoothed, color='red', linewidth=2, label=f'{window}-episode MA')
-            plt.xlabel('Episode')
-            plt.ylabel('Total Reward')
-            plt.title('HMASD Sync Training Reward Progress')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            
-            # 奖励分布直方图
-            plt.subplot(2, 3, 2)
-            plt.hist(rewards, bins=50, alpha=0.7, color='green')
-            plt.xlabel('Total Reward')
-            plt.ylabel('Frequency')
-            plt.title('Reward Distribution')
-            plt.grid(True, alpha=0.3)
-            
-            # Episode长度趋势
-            lengths = [r['episode_length'] for r in self.training_rewards['episode_rewards']]
-            plt.subplot(2, 3, 3)
-            plt.plot(episodes, lengths, alpha=0.6, color='orange')
-            plt.xlabel('Episode')
-            plt.ylabel('Episode Length')
-            plt.title('Episode Length Progression')
-            plt.grid(True, alpha=0.3)
-            
-            # 奖励方差趋势
-            if self.training_rewards['reward_variance']:
-                var_episodes = [v['episode'] for v in self.training_rewards['reward_variance']]
-                var_means = [v['mean'] for v in self.training_rewards['reward_variance']]
-                var_stds = [v['std'] for v in self.training_rewards['reward_variance']]
+            # 1. Episode奖励趋势图
+            if self.training_rewards['episode_rewards']:
+                episodes = [r['episode'] for r in self.training_rewards['episode_rewards']]
+                rewards = [r['total_reward'] for r in self.training_rewards['episode_rewards']]
                 
-                plt.subplot(2, 3, 4)
-                plt.errorbar(var_episodes, var_means, yerr=var_stds, alpha=0.7, color='purple')
-                plt.xlabel('Episode')
-                plt.ylabel('Mean Reward ± Std')
-                plt.title('Reward Stability (100-episode window)')
-                plt.grid(True, alpha=0.3)
+                # 创建图形时使用上下文管理器
+                fig = plt.figure(figsize=(15, 10))
+                try:
+                    # 原始奖励曲线
+                    plt.subplot(2, 3, 1)
+                    plt.plot(episodes, rewards, alpha=0.3, color='blue', label='Episode Rewards')
+                    if len(rewards) >= 50:
+                        window = min(50, len(rewards))
+                        smoothed = pd.Series(rewards).rolling(window=window, center=True).mean()
+                        plt.plot(episodes, smoothed, color='red', linewidth=2, label=f'{window}-episode MA')
+                    plt.xlabel('Episode')
+                    plt.ylabel('Total Reward')
+                    plt.title('HMASD Sync Training Reward Progress')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    
+                    # 奖励分布直方图
+                    plt.subplot(2, 3, 2)
+                    plt.hist(rewards, bins=50, alpha=0.7, color='green')
+                    plt.xlabel('Total Reward')
+                    plt.ylabel('Frequency')
+                    plt.title('Reward Distribution')
+                    plt.grid(True, alpha=0.3)
+                    
+                    # Episode长度趋势
+                    lengths = [r['episode_length'] for r in self.training_rewards['episode_rewards']]
+                    plt.subplot(2, 3, 3)
+                    plt.plot(episodes, lengths, alpha=0.6, color='orange')
+                    plt.xlabel('Episode')
+                    plt.ylabel('Episode Length')
+                    plt.title('Episode Length Progression')
+                    plt.grid(True, alpha=0.3)
+                    
+                    # 奖励方差趋势
+                    if self.training_rewards['reward_variance']:
+                        var_episodes = [v['episode'] for v in self.training_rewards['reward_variance']]
+                        var_means = [v['mean'] for v in self.training_rewards['reward_variance']]
+                        var_stds = [v['std'] for v in self.training_rewards['reward_variance']]
+                        
+                        plt.subplot(2, 3, 4)
+                        plt.errorbar(var_episodes, var_means, yerr=var_stds, alpha=0.7, color='purple')
+                        plt.xlabel('Episode')
+                        plt.ylabel('Mean Reward ± Std')
+                        plt.title('Reward Stability (100-episode window)')
+                        plt.grid(True, alpha=0.3)
+                    
+                    # 同步训练效率
+                    if self.sync_training_metrics['sync_efficiency']:
+                        plt.subplot(2, 3, 5)
+                        sync_updates = range(1, len(self.sync_training_metrics['sync_efficiency']) + 1)
+                        plt.plot(sync_updates, self.sync_training_metrics['sync_efficiency'], 'bo-', alpha=0.7)
+                        plt.xlabel('Sync Update')
+                        plt.ylabel('Efficiency (samples/sec)')
+                        plt.title('Sync Training Efficiency')
+                        plt.grid(True, alpha=0.3)
+                    
+                    # 策略版本进展
+                    if self.sync_training_metrics['policy_versions']:
+                        plt.subplot(2, 3, 6)
+                        updates = range(1, len(self.sync_training_metrics['policy_versions']) + 1)
+                        plt.plot(updates, self.sync_training_metrics['policy_versions'], 'ro-', alpha=0.7)
+                        plt.xlabel('Sync Update')
+                        plt.ylabel('Policy Version')
+                        plt.title('Policy Version Progress')
+                        plt.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    
+                    # 保存图表
+                    output_path = os.path.join(export_dir, f'sync_training_progress_step_{step}.png')
+                    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                    
+                finally:
+                    # 确保图形资源被正确释放
+                    plt.close(fig)
+                    plt.clf()  # 清除当前figure
+                    plt.cla()  # 清除当前axes
+                    
+        except Exception as e:
+            # 图表生成失败时记录错误但不中断训练
+            try:
+                import logging
+                logger = logging.getLogger('HMASD-Sync-Enhanced')
+                logger.warning(f"生成训练图表时出错 (步骤 {step}): {e}")
+            except:
+                print(f"Warning: 生成训练图表时出错 (步骤 {step}): {e}")
             
-            # 同步训练效率
-            if self.sync_training_metrics['sync_efficiency']:
-                plt.subplot(2, 3, 5)
-                sync_updates = range(1, len(self.sync_training_metrics['sync_efficiency']) + 1)
-                plt.plot(sync_updates, self.sync_training_metrics['sync_efficiency'], 'bo-', alpha=0.7)
-                plt.xlabel('Sync Update')
-                plt.ylabel('Efficiency (samples/sec)')
-                plt.title('Sync Training Efficiency')
-                plt.grid(True, alpha=0.3)
-            
-            # 策略版本进展
-            if self.sync_training_metrics['policy_versions']:
-                plt.subplot(2, 3, 6)
-                updates = range(1, len(self.sync_training_metrics['policy_versions']) + 1)
-                plt.plot(updates, self.sync_training_metrics['policy_versions'], 'ro-', alpha=0.7)
-                plt.xlabel('Sync Update')
-                plt.ylabel('Policy Version')
-                plt.title('Policy Version Progress')
-                plt.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            plt.savefig(os.path.join(export_dir, f'sync_training_progress_step_{step}.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+            # 确保清理资源
+            try:
+                plt.close('all')
+            except:
+                pass
     
     def log_to_tensorboard(self, writer, step):
         """记录详细数据到TensorBoard"""
