@@ -21,7 +21,6 @@ from envs.pettingzoo.scenario2 import UAVCooperativeNetworkEnv
 from hmasd.agent import HMASDAgent
 from config_1 import Config
 from logger import main_logger
-from evaltools.eval_utils import evaluate_agent
 
 def parse_args():
     """解析命令行参数"""
@@ -73,6 +72,214 @@ def reset_all_envs(envs):
         infos.append(info)
     
     return states, observations, infos
+
+def evaluate_agent(agent, eval_envs, config, num_episodes=10):
+    """
+    评估HMASD代理（参考train_enhanced_reward_tracking.py实现）
+    支持并行环境和增强的性能指标收集
+    """
+    main_logger.info(f"开始评估: {num_episodes} episodes")
+    
+    num_envs = len(eval_envs)
+    episode_rewards = []
+    
+    # 重置环境
+    states, observations, infos = reset_all_envs(eval_envs)
+    
+    env_steps = [0] * num_envs
+    env_rewards = [0.0] * num_envs
+    completed_episodes = 0
+    
+    # 收集性能指标
+    performance_metrics = {
+        'served_users': [],
+        'total_users': [],
+        'coverage_ratios': [],
+        'system_throughputs': [],
+        'avg_user_throughputs': [],
+        'connectivity_ratios': []
+    }
+    
+    # 设置为评估模式
+    agent.skill_coordinator.eval()
+    agent.skill_discoverer.eval()
+    agent.team_discriminator.eval()
+    agent.individual_discriminator.eval()
+    
+    with torch.no_grad():
+        while completed_episodes < num_episodes:
+            all_actions_list = []
+            
+            for i in range(num_envs):
+                actions, agent_info = agent.step(states[i], observations[i], env_steps[i], deterministic=True, env_id=i)
+                all_actions_list.append(actions)
+            
+            # 执行环境步骤
+            next_states = []
+            next_observations = []
+            rewards = []
+            dones = []
+            step_infos = []
+            
+            for i, env in enumerate(eval_envs):
+                next_obs, reward, done, truncated, info = env.step(all_actions_list[i])
+                next_state = info.get('state', np.zeros(config.state_dim))
+                
+                # 处理下一个观测：如果是字典格式，提取'obs'字段
+                if isinstance(next_obs, dict):
+                    if len(next_obs) > 0:
+                        first_agent_key = list(next_obs.keys())[0]
+                        if isinstance(next_obs[first_agent_key], dict) and 'obs' in next_obs[first_agent_key]:
+                            # 从字典格式的观测中提取观测数组
+                            obs_array = []
+                            for agent_key in sorted(next_obs.keys()):
+                                obs_array.append(next_obs[agent_key]['obs'])
+                            next_obs = np.array(obs_array)
+                        else:
+                            # 如果不是预期的格式，转换为数组
+                            next_obs = np.array([obs for obs in next_obs.values()])
+                
+                # 处理done状态：将字典格式转换为布尔值
+                if isinstance(done, dict):
+                    done_value = any(done.values()) if done else False
+                elif isinstance(done, (list, tuple)):
+                    done_value = any(done) if done else False
+                else:
+                    done_value = bool(done)
+                
+                # 处理truncated状态
+                if isinstance(truncated, dict):
+                    truncated_value = any(truncated.values()) if truncated else False
+                elif isinstance(truncated, (list, tuple)):
+                    truncated_value = any(truncated) if truncated else False
+                else:
+                    truncated_value = bool(truncated)
+                
+                next_states.append(next_state)
+                next_observations.append(next_obs)
+                rewards.append(reward)
+                dones.append(done_value or truncated_value)
+                step_infos.append(info)
+                
+                # 处理奖励类型转换
+                if isinstance(reward, dict):
+                    reward_scalar = sum(reward.values())
+                else:
+                    reward_scalar = reward if isinstance(reward, (int, float)) else reward.item()
+                
+                # 更新统计
+                env_steps[i] += 1
+                env_rewards[i] += reward_scalar
+                
+                # 收集性能指标
+                if 'reward_info' in info:
+                    reward_info = info['reward_info']
+                    
+                    if 'connected_users' in reward_info:
+                        performance_metrics['served_users'].append(reward_info['connected_users'])
+                    
+                    if 'system_throughput_mbps' in reward_info:
+                        performance_metrics['system_throughputs'].append(reward_info['system_throughput_mbps'])
+                    
+                    if 'avg_throughput_per_user_mbps' in reward_info:
+                        performance_metrics['avg_user_throughputs'].append(reward_info['avg_throughput_per_user_mbps'])
+                    
+                    if 'connectivity_ratio' in reward_info:
+                        performance_metrics['connectivity_ratios'].append(reward_info['connectivity_ratio'])
+                
+                if dones[i] and completed_episodes < num_episodes:
+                    episode_rewards.append(env_rewards[i])
+                    completed_episodes += 1
+                    
+                    # 记录episode完成信息
+                    episode_info = {
+                        'episode': completed_episodes,
+                        'env_id': i,
+                        'total_reward': env_rewards[i],
+                        'episode_length': env_steps[i]
+                    }
+                    
+                    # 添加性能指标到episode信息
+                    if 'reward_info' in info:
+                        reward_info = info['reward_info']
+                        if 'connected_users' in reward_info:
+                            episode_info['served_users'] = reward_info['connected_users']
+                        if 'system_throughput_mbps' in reward_info:
+                            episode_info['system_throughput'] = reward_info['system_throughput_mbps']
+                        if 'connectivity_ratio' in reward_info:
+                            episode_info['coverage_ratio'] = reward_info['connectivity_ratio']
+                    
+                    main_logger.info(f"评估 Episode {completed_episodes}/{num_episodes}, "
+                                   f"奖励: {env_rewards[i]:.4f}, 步数: {env_steps[i]}, "
+                                   f"服务用户: {episode_info.get('served_users', 0)}, "
+                                   f"系统吞吐量: {episode_info.get('system_throughput', 0):.2f}Mbps")
+                    
+                    # 重置环境状态
+                    env_steps[i] = 0
+                    env_rewards[i] = 0
+                    
+                    # 重置环境
+                    next_obs, info = env.reset()
+                    next_states[i] = info.get('state', np.zeros(config.state_dim))
+                    
+                    # 处理重置后的观测
+                    if isinstance(next_obs, dict):
+                        if len(next_obs) > 0:
+                            first_agent_key = list(next_obs.keys())[0]
+                            if isinstance(next_obs[first_agent_key], dict) and 'obs' in next_obs[first_agent_key]:
+                                obs_array = []
+                                for agent_key in sorted(next_obs.keys()):
+                                    obs_array.append(next_obs[agent_key]['obs'])
+                                next_obs = np.array(obs_array)
+                            else:
+                                next_obs = np.array([obs for obs in next_obs.values()])
+                    
+                    next_observations[i] = next_obs
+            
+            states = next_states
+            observations = next_observations
+            
+            if completed_episodes >= num_episodes:
+                break
+    
+    # 恢复训练模式
+    agent.skill_coordinator.train()
+    agent.skill_discoverer.train()
+    agent.team_discriminator.train()
+    agent.individual_discriminator.train()
+    
+    # 计算统计结果
+    mean_reward = np.mean(episode_rewards) if episode_rewards else 0
+    std_reward = np.std(episode_rewards) if episode_rewards else 0
+    min_reward = np.min(episode_rewards) if episode_rewards else 0
+    max_reward = np.max(episode_rewards) if episode_rewards else 0
+    
+    # 计算性能指标统计
+    performance_stats = {}
+    for metric_name, metric_values in performance_metrics.items():
+        if metric_values:
+            performance_stats[f'mean_{metric_name}'] = np.mean(metric_values)
+            performance_stats[f'std_{metric_name}'] = np.std(metric_values)
+            performance_stats[f'max_{metric_name}'] = np.max(metric_values)
+    
+    results = {
+        'mean_reward': mean_reward,
+        'std_reward': std_reward,
+        'min_reward': min_reward,
+        'max_reward': max_reward,
+        'episode_rewards': episode_rewards,
+        **performance_stats
+    }
+    
+    # 记录详细的评估结果
+    main_logger.info(f"评估完成: 平均奖励={mean_reward:.4f}±{std_reward:.4f}")
+    if performance_stats:
+        main_logger.info("性能指标:")
+        for key, value in performance_stats.items():
+            if 'mean_' in key:
+                main_logger.info(f"  {key}: {value:.4f}")
+    
+    return results
 
 def train_sync(vec_env, eval_vec_env, config, args, device):
     """同步训练主循环"""
@@ -287,9 +494,33 @@ def train_sync(vec_env, eval_vec_env, config, args, device):
                 main_logger.info(f"评估结果: 平均奖励={eval_results['mean_reward']:.4f}, "
                                f"标准差={eval_results['std_reward']:.4f}")
                 
-                # 记录到TensorBoard
+                # 记录到TensorBoard - 增强版本
                 agent.writer.add_scalar('Eval/MeanReward', eval_results['mean_reward'], total_steps)
                 agent.writer.add_scalar('Eval/StdReward', eval_results['std_reward'], total_steps)
+                agent.writer.add_scalar('Eval/MinReward', eval_results['min_reward'], total_steps)
+                agent.writer.add_scalar('Eval/MaxReward', eval_results['max_reward'], total_steps)
+                
+                # 记录性能指标到TensorBoard
+                for key, value in eval_results.items():
+                    if key.startswith('mean_') and isinstance(value, (int, float)):
+                        metric_name = key.replace('mean_', '')
+                        agent.writer.add_scalar(f'Eval/{metric_name.title()}', value, total_steps)
+                    elif key.startswith('std_') and isinstance(value, (int, float)):
+                        metric_name = key.replace('std_', '')
+                        agent.writer.add_scalar(f'Eval/{metric_name.title()}_Std', value, total_steps)
+                    elif key.startswith('max_') and isinstance(value, (int, float)):
+                        metric_name = key.replace('max_', '')
+                        agent.writer.add_scalar(f'Eval/{metric_name.title()}_Max', value, total_steps)
+                
+                # 记录详细的性能指标日志
+                if any(key.startswith('mean_') for key in eval_results.keys()):
+                    perf_metrics = []
+                    for key, value in eval_results.items():
+                        if key.startswith('mean_') and isinstance(value, (int, float)):
+                            metric_name = key.replace('mean_', '')
+                            perf_metrics.append(f"{metric_name}={value:.4f}")
+                    if perf_metrics:
+                        main_logger.info(f"评估性能指标: {', '.join(perf_metrics)}")
                 
             except Exception as e:
                 main_logger.error(f"评估失败: {e}")

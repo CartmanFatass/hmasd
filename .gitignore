@@ -40,6 +40,8 @@ logs/
 *.gz
 *.zip
 data/
+tf-logs/
+test/
 
 # 生成的模型和结果
 models/
