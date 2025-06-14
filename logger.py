@@ -112,23 +112,50 @@ def init_multiproc_logging(log_dir='logs', log_file=None, file_level=logging.INF
 def shutdown_logging():
     """关闭日志系统，确保所有日志都被记录"""
     global _queue_listener, _log_queue, _mp_manager
+    
     try:
+        # 1. 先停止队列监听器
         if _queue_listener:
+            print("[logger] 正在停止日志监听器...")
             _queue_listener.stop()
+            print("[logger] 日志监听器已停止")
     except (AttributeError, Exception) as e:
-        print(f"[logger] 警告: 关闭日志系统时出错: {e}")
+        print(f"[logger] 警告: 关闭日志监听器时出错: {e}")
     finally:
         _queue_listener = None
+    
+    try:
+        # 2. 清空队列中剩余的日志记录
+        if _log_queue:
+            print("[logger] 正在清空日志队列...")
+            try:
+                while not _log_queue.empty():
+                    try:
+                        _log_queue.get_nowait()
+                    except:
+                        break
+                print("[logger] 日志队列已清空")
+            except:
+                pass
+    except (AttributeError, Exception) as e:
+        print(f"[logger] 警告: 清空日志队列时出错: {e}")
+    finally:
         _log_queue = None
         
-        # 尝试关闭Manager并释放资源
-        try:
-            if _mp_manager:
-                _mp_manager.shutdown()
-        except (AttributeError, Exception) as e:
-            print(f"[logger] 警告: 关闭Manager时出错: {e}")
-        finally:
-            _mp_manager = None
+    try:
+        # 3. 关闭Manager（给它一些时间完成清理）
+        if _mp_manager:
+            print("[logger] 正在关闭Manager...")
+            import time
+            time.sleep(0.1)  # 短暂等待确保所有操作完成
+            _mp_manager.shutdown()
+            print("[logger] Manager已关闭")
+    except (AttributeError, Exception) as e:
+        print(f"[logger] 警告: 关闭Manager时出错: {e}")
+    finally:
+        _mp_manager = None
+    
+    print("[logger] 日志系统关闭完成")
 
 def get_logger(name):
     """获取配置好的子日志记录器"""

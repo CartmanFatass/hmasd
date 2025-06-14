@@ -43,7 +43,7 @@ data/
 tf-logs/
 test/
 test*.py
-*.pdf
+#*.pdf
 *.txt
 *.md
 !README.md
