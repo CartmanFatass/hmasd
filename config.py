@@ -41,9 +41,9 @@ class Config:
     lambda_l = 0.01          # 低层策略熵权重（论文3m场景设置）
 
     # 训练参数
-    buffer_size = 10000      # 经验回放缓冲区大小（增大以支持更多rollout数据）
-    batch_size = 128         # 批处理大小
-    high_level_batch_size = 128  # 高层更新的批处理大小（调整为rollout_length大小）
+    buffer_size = 25000      # 经验回放缓冲区大小（增大以支持更多rollout数据）
+    batch_size = 4096        # 低层批处理大小（应为 32 × 128 = 4096）
+    high_level_batch_size = 128  # 高层更新的批处理大小（32环境 × 128步 ÷ 32k = 128）
     num_envs = 32            # 并行环境数量（与rollout并行环境一致）
     total_timesteps = 5e6    # 总时间步数
     eval_interval = 1000     # 评估间隔
@@ -88,7 +88,7 @@ class Config:
     # =================================================================
     # 数据收集阶段
     rollout_skill_reassign_interval = 50  # 技能重新分配间隔（等于k值）
-    rollout_max_episode_length = 500      # 单个episode最大长度（避免无限episode）
+    rollout_max_episode_length = 5000     # 单个episode最大长度（匹配环境设置）
     rollout_early_termination = True      # 启用early termination（环境完成任务时）
     
     # 训练阶段控制

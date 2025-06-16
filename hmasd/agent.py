@@ -399,7 +399,21 @@ class HMASDAgent:
         """
         if agent_skills is None:
             agent_skills = self.env_agent_skills.get(env_id, self.current_agent_skills)
-            
+        
+        # 【设备修复】确保输入数据在正确的设备上
+        if isinstance(observations, np.ndarray):
+            observations = torch.FloatTensor(observations).to(self.device)
+        elif isinstance(observations, torch.Tensor):
+            observations = observations.to(self.device)
+        
+        # 【关键修复】确保agent_skills是正确的类型和设备
+        if isinstance(agent_skills, np.ndarray):
+            agent_skills = agent_skills.tolist()
+        elif isinstance(agent_skills, torch.Tensor):
+            agent_skills = agent_skills.cpu().tolist()
+        elif agent_skills is None:
+            agent_skills = [0] * observations.shape[0]  # 默认技能
+        
         n_agents = observations.shape[0]
         actions = torch.zeros((n_agents, self.config.action_dim), device=self.device)
         action_logprobs = torch.zeros(n_agents, device=self.device)
@@ -413,8 +427,8 @@ class HMASDAgent:
         
         with torch.no_grad():
             for i in range(n_agents):
-                obs = torch.FloatTensor(observations[i]).unsqueeze(0).to(self.device)
-                skill = torch.tensor(agent_skills[i], device=self.device)
+                obs = observations[i].unsqueeze(0)  # 已经在正确设备上
+                skill = torch.tensor(agent_skills[i], dtype=torch.long, device=self.device)
                 
                 action, action_logprob, _ = self.skill_discoverer(obs, skill, deterministic)
                 
@@ -424,7 +438,8 @@ class HMASDAgent:
         # 保存更新后的GRU隐藏状态
         self.env_hidden_states[env_id] = self.skill_discoverer.actor_hidden
         
-        return actions.cpu().numpy(), action_logprobs.cpu().numpy()
+        # 【关键修复】确保返回的actions和action_logprobs是numpy数组，避免设备不匹配
+        return actions.cpu().detach().numpy(), action_logprobs.cpu().detach().numpy()
     
     def assign_skills(self, state, observations, deterministic=False):
         """
@@ -440,8 +455,20 @@ class HMASDAgent:
             agent_skills: 个体技能索引列表 [n_agents]
             log_probs: 包含团队技能和个体技能log probabilities的字典
         """
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        obs_tensor = torch.FloatTensor(observations).unsqueeze(0).to(self.device)
+        # 【设备修复】确保输入数据在正确的设备上
+        if isinstance(state, np.ndarray):
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        elif isinstance(state, torch.Tensor):
+            state_tensor = state.unsqueeze(0).to(self.device) if state.dim() == 1 else state.to(self.device)
+        else:
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        
+        if isinstance(observations, np.ndarray):
+            obs_tensor = torch.FloatTensor(observations).unsqueeze(0).to(self.device)
+        elif isinstance(observations, torch.Tensor):
+            obs_tensor = observations.unsqueeze(0).to(self.device) if observations.dim() == 2 else observations.to(self.device)
+        else:
+            obs_tensor = torch.FloatTensor(observations).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
             team_skill, agent_skills, Z_logits, z_logits = self.skill_coordinator(
@@ -464,7 +491,11 @@ class HMASDAgent:
                 'agent_log_probs': z_log_probs
             }
         
-        return team_skill.item(), agent_skills.squeeze(0).cpu().numpy(), log_probs
+        # 【关键修复】确保返回值是Python原生类型，避免设备不匹配
+        team_skill_value = team_skill.item() if isinstance(team_skill, torch.Tensor) else int(team_skill)
+        agent_skills_list = agent_skills.squeeze(0).cpu().tolist() if isinstance(agent_skills, torch.Tensor) else list(agent_skills)
+        
+        return team_skill_value, agent_skills_list, log_probs
     
     def step(self, state, observations, ep_t, deterministic=False, env_id=0):
         """
@@ -583,13 +614,13 @@ class HMASDAgent:
         
         return actions, info
     
-    def collect_episode(self, env, max_steps=1000):
+    def collect_episode(self, env, max_steps=5000):
         """
         收集完整episode的数据（episode-based训练模式）
         
         参数:
             env: 环境实例
-            max_steps: 最大步数限制
+            max_steps: 最大步数限制（默认5000，匹配环境设置）
             
         返回:
             episode_info: episode信息字典
@@ -709,7 +740,7 @@ class HMASDAgent:
     
     def should_rollout_update(self):
         """
-        判断是否应该进行rollout更新 - 修复版本
+        判断是否应该进行rollout更新 - 修复版本：统一步数计算
         
         返回:
             bool: 是否应该更新
@@ -723,7 +754,7 @@ class HMASDAgent:
         # 【修复C2】每100步记录一次进度，避免日志过多
         if self.steps_collected % 100 == 0 or not hasattr(self, '_last_debug_step'):
             progress_percent = (self.steps_collected / target_steps) * 100
-            main_logger.info(f"[ROLLOUT_UPDATE_CHECK] 当前进度: {self.steps_collected}/{target_steps} "
+            main_logger.info(f"[AGENT_ROLLOUT_CHECK] 当前进度: {self.steps_collected}/{target_steps} "
                            f"({progress_percent:.1f}%) - rollout_length={self.rollout_length}, "
                            f"num_parallel_envs={self.num_parallel_envs}")
             self._last_debug_step = self.steps_collected
@@ -732,13 +763,13 @@ class HMASDAgent:
         
         # 【修复C3】记录更新决策的详细信息
         if should_update:
-            main_logger.info(f"🔄 满足rollout更新条件: 收集步数={self.steps_collected}, "
+            main_logger.info(f"🔄 [AGENT] 满足rollout更新条件: 收集步数={self.steps_collected}, "
                            f"目标步数={target_steps}, 超出={self.steps_collected - target_steps}")
         
         # 【新增C4】如果接近目标但还没达到，记录详细状态
         elif self.steps_collected >= target_steps * 0.9:  # 90%以上时记录
             remaining = target_steps - self.steps_collected
-            main_logger.info(f"⏳ 接近更新条件: 还需{remaining}步 "
+            main_logger.info(f"⏳ [AGENT] 接近更新条件: 还需{remaining}步 "
                            f"({self.steps_collected}/{target_steps})")
         
         return should_update
@@ -767,10 +798,13 @@ class HMASDAgent:
         main_logger.info(f"📊 数据统计: 收集步数={steps_for_update}, 目标样本={target_samples}, "
                         f"并行环境={self.num_parallel_envs}")
         
-        # 【关键修复】在训练前强制收集所有pending的高层经验
-        #main_logger.info("🔍 Rollout结束，强制收集所有pending高层经验...")
-        #pending_collections = self._force_collect_all_pending_high_level_experiences()
-        #main_logger.info(f"✅ 强制收集完成，新增 {pending_collections} 个高层经验")
+        # 【增强修复】在训练前等待数据传输完成并验证完整性
+        main_logger.info("🔍 等待数据传输完成并验证完整性...")
+        data_integrity_verified = self._wait_for_complete_data_transmission(target_samples)
+        
+        if not data_integrity_verified:
+            main_logger.error("❌ 数据传输完整性验证失败，跳过此次更新")
+            return None
         
         # 记录更新前的缓冲区状态
         high_level_size_before = len(self.high_level_buffer)
@@ -796,8 +830,9 @@ class HMASDAgent:
         main_logger.warning(f"[ROLLOUT_TIMER_DEBUG] 各环境技能计时器状态: {env_timer_status}")
         
         # 验证数据收集的完整性
-        if steps_for_update != self.rollout_length:
-            main_logger.warning(f"⚠️ 收集步数({steps_for_update})与目标({self.rollout_length})不匹配")
+        expected_total_steps = self.rollout_length * self.num_parallel_envs  # 128 * 32 = 4096
+        if steps_for_update != expected_total_steps:
+            main_logger.warning(f"⚠️ 收集步数({steps_for_update})与目标({expected_total_steps})不匹配")
         
         # 执行15轮PPO训练（严格按照论文设置）
         main_logger.info(f"🎯 开始{self.ppo_epochs}轮PPO训练（使用全部数据）")
@@ -1027,9 +1062,88 @@ class HMASDAgent:
         
         return pending_collections
     
+    def _wait_for_complete_data_transmission(self, target_samples):
+        """
+        等待数据传输完成并验证完整性（Agent层面的数据完整性保障）
+        
+        参数:
+            target_samples: 目标样本数量
+            
+        返回:
+            bool: 数据传输是否完整
+        """
+        max_wait_time = 20.0  # 最多等待20秒
+        wait_start = time.time()
+        
+        main_logger.info(f"🔍 [AGENT_DATA_WAIT] 开始等待数据传输完成...")
+        main_logger.info(f"   目标样本: 低层={target_samples}, 高层={target_samples // self.config.k}")
+        
+        # 预期的高层经验数量
+        expected_high_level = target_samples // self.config.k
+        
+        verification_attempts = 0
+        max_verification_attempts = 15
+        
+        while verification_attempts < max_verification_attempts and time.time() - wait_start < max_wait_time:
+            # 检查当前缓冲区状态
+            current_low_level = len(self.low_level_buffer)
+            current_high_level = len(self.high_level_buffer)
+            
+            main_logger.info(f"🔍 [AGENT_DATA_WAIT] 验证#{verification_attempts + 1}: "
+                           f"低层={current_low_level}/{target_samples}, "
+                           f"高层={current_high_level}/{expected_high_level}")
+            
+            # 检查数据是否完整
+            low_level_complete = current_low_level >= target_samples * 0.98  # 允许2%容差
+            high_level_complete = current_high_level >= expected_high_level * 0.95  # 允许5%容差
+            
+            if low_level_complete and high_level_complete:
+                wait_time = time.time() - wait_start
+                main_logger.info(f"✅ [AGENT_DATA_WAIT] 数据传输完整性验证通过，等待时间: {wait_time:.2f}s")
+                return True
+            
+            # 如果数据不完整，等待一段时间再检查
+            verification_attempts += 1
+            if verification_attempts < max_verification_attempts:
+                main_logger.info(f"⏳ [AGENT_DATA_WAIT] 数据未完整，等待1秒后重新验证...")
+                time.sleep(1.0)
+        
+        # 最终检查
+        final_low_level = len(self.low_level_buffer)
+        final_high_level = len(self.high_level_buffer)
+        
+        low_level_missing = target_samples - final_low_level
+        high_level_missing = expected_high_level - final_high_level
+        
+        main_logger.warning(f"⚠️ [AGENT_DATA_WAIT] 数据传输验证超时:")
+        main_logger.warning(f"   低层: {final_low_level}/{target_samples} (缺失: {low_level_missing})")
+        main_logger.warning(f"   高层: {final_high_level}/{expected_high_level} (缺失: {high_level_missing})")
+        
+        # 计算缺失百分比
+        total_missing = low_level_missing + high_level_missing
+        total_expected = target_samples + expected_high_level
+        missing_pct = (total_missing / total_expected) * 100 if total_expected > 0 else 0
+        
+        if missing_pct <= 3.0:  # 允许3%的缺失
+            main_logger.warning(f"⚠️ [AGENT_DATA_WAIT] 数据轻微缺失({missing_pct:.1f}%)，允许继续训练")
+            return True
+        else:
+            main_logger.error(f"❌ [AGENT_DATA_WAIT] 数据严重缺失({missing_pct:.1f}%)，拒绝此次更新")
+            return False
+    
     def _rollout_update_coordinator(self):
         """rollout模式下的高层策略更新（使用全部数据，不采样）"""
-        if len(self.high_level_buffer) == 0:
+        # 【关键修复】检查缓冲区大小是否满足最低要求
+        required_batch_size = self.config.high_level_batch_size
+        current_buffer_size = len(self.high_level_buffer)
+        
+        if current_buffer_size == 0:
+            main_logger.debug(f"[ROLLOUT_COORDINATOR] 高层缓冲区为空，跳过更新")
+            return self._get_default_coordinator_info()
+        
+        if current_buffer_size < required_batch_size:
+            main_logger.warning(f"[ROLLOUT_COORDINATOR] 高层缓冲区不足，需要{required_batch_size}个样本，"
+                              f"但只有{current_buffer_size}个。跳过此轮更新。")
             return self._get_default_coordinator_info()
         
         # 使用全部数据（num_mini_batch=1的含义）
@@ -1423,6 +1537,12 @@ class HMASDAgent:
             bool: 是否成功存储
         """
         try:
+            # 记录存储尝试
+            buffer_size_before = len(self.high_level_buffer)
+            main_logger.debug(f"🔵 [HIGH_LEVEL_STORE] Worker {worker_id} 尝试存储高层经验: "
+                           f"team_skill={team_skill}, accumulated_reward={accumulated_reward:.4f}, "
+                           f"缓冲区大小={buffer_size_before}")
+            
             # 转换为tensor格式
             state_tensor = torch.FloatTensor(state).to(self.device)
             team_skill_tensor = torch.tensor(team_skill, device=self.device)
@@ -1462,20 +1582,24 @@ class HMASDAgent:
                 if len(self.high_level_buffer_with_logprobs) > self.config.buffer_size:
                     self.high_level_buffer_with_logprobs = self.high_level_buffer_with_logprobs[-self.config.buffer_size:]
             
-            main_logger.debug(f"高层经验存储成功: worker_id={worker_id}, 累积奖励={accumulated_reward:.4f}, "
-                            f"缓冲区大小={len(self.high_level_buffer)}")
+            # 记录存储成功
+            buffer_size_after = len(self.high_level_buffer)
+            main_logger.debug(f"✅ [HIGH_LEVEL_STORE] Worker {worker_id} 高层经验存储成功: "
+                           f"缓冲区大小 {buffer_size_before}→{buffer_size_after}, "
+                           f"累积奖励={accumulated_reward:.4f}, "
+                           f"总样本数={self.high_level_samples_total}")
             
             return True
             
         except Exception as e:
-            main_logger.error(f"存储高层经验失败: {e}")
+            main_logger.error(f"❌ [HIGH_LEVEL_STORE] Worker {worker_id} 高层经验存储失败: {e}")
             return False
     
     def store_low_level_transition(self, state, next_state, observations, next_observations,
                                  actions, rewards, dones, team_skill, agent_skills, 
                                  action_logprobs, skill_log_probs=None, worker_id=0):
         """
-        存储低层经验（专门用于多线程训练）
+        存储低层经验（专门用于多线程训练）- 修复版本：避免多智能体重复计数
         
         参数:
             state: 全局状态 [state_dim]
@@ -1496,12 +1620,22 @@ class HMASDAgent:
         """
         try:
             n_agents = len(agent_skills)
+            
+            # 记录存储尝试
+            buffer_size_before = len(self.low_level_buffer)
+            current_reward = rewards if isinstance(rewards, (int, float)) else rewards.item()
+            main_logger.debug(f"🟢 [LOW_LEVEL_STORE] Worker {worker_id} 尝试存储低层经验: "
+                           f"n_agents={n_agents}, reward={current_reward:.4f}, "
+                           f"缓冲区大小={buffer_size_before}")
+            
             state_tensor = torch.FloatTensor(state).to(self.device)
             next_state_tensor = torch.FloatTensor(next_state).to(self.device)
             team_skill_tensor = torch.tensor(team_skill, device=self.device)
-            
-            # 确保rewards是数值类型
-            current_reward = rewards if isinstance(rewards, (int, float)) else rewards.item()
+            observations_tensor = torch.FloatTensor(observations).to(self.device)
+            next_observations_tensor = torch.FloatTensor(next_observations).to(self.device)
+            actions_tensor = torch.FloatTensor(actions).to(self.device)
+            action_logprobs_tensor = torch.FloatTensor(action_logprobs).to(self.device)
+            agent_skills_tensor = torch.tensor(agent_skills, device=self.device)
             
             # 计算团队技能判别器输出
             with torch.no_grad():
@@ -1509,62 +1643,53 @@ class HMASDAgent:
                 team_disc_log_probs = F.log_softmax(team_disc_logits, dim=-1)
                 team_skill_log_prob = team_disc_log_probs[0, team_skill]
             
-            # 为每个智能体存储低层经验
-            for i in range(n_agents):
-                obs = torch.FloatTensor(observations[i]).to(self.device)
-                next_obs = torch.FloatTensor(next_observations[i]).to(self.device)
-                action = torch.FloatTensor(actions[i]).to(self.device)
-                done = dones if isinstance(dones, bool) else dones[i] if isinstance(dones, list) else dones
-                
-                # 计算个体技能判别器输出
-                with torch.no_grad():
-                    agent_disc_logits = self.individual_discriminator(
-                        next_obs.unsqueeze(0), 
-                        team_skill_tensor
-                    )
-                    agent_disc_log_probs = F.log_softmax(agent_disc_logits, dim=-1)
-                    agent_skill_log_prob = agent_disc_log_probs[0, agent_skills[i]]
-                    
-                # 计算低层奖励（Eq. 4）及其组成部分
-                env_reward_component = self.config.lambda_e * current_reward
-                team_disc_component = self.config.lambda_D * team_skill_log_prob.item()
-                ind_disc_component = self.config.lambda_d * agent_skill_log_prob.item()
-                
-                intrinsic_reward = env_reward_component + team_disc_component + ind_disc_component
-                
-                # 存储低层经验
-                low_level_experience = (
-                    state_tensor,                           # 全局状态s
-                    team_skill_tensor,                      # 团队技能Z
-                    obs,                                    # 智能体观测o_i
-                    torch.tensor(agent_skills[i], device=self.device),  # 个体技能z_i
-                    action,                                 # 动作a_i
-                    torch.tensor(intrinsic_reward, device=self.device),  # 总内在奖励r_i
-                    torch.tensor(done, dtype=torch.float, device=self.device),  # 是否结束
-                    torch.tensor(action_logprobs[i], device=self.device),  # 动作对数概率
-                    torch.tensor(env_reward_component, device=self.device), # 环境奖励部分
-                    torch.tensor(team_disc_component, device=self.device),  # 团队判别器部分
-                    torch.tensor(ind_disc_component, device=self.device)   # 个体判别器部分
-                )
-                self.low_level_buffer.push(low_level_experience)
+            # 【关键修复】只存储一个团队级别的低层经验，包含所有智能体信息
+            # 避免为每个智能体单独存储，防止重复计数
             
-            # 存储技能判别器训练数据
-            observations_tensor = torch.FloatTensor(next_observations).to(self.device)
-            agent_skills_tensor = torch.tensor(agent_skills, device=self.device)
-            self.state_skill_dataset.push(
-                next_state_tensor,
-                team_skill_tensor,
-                observations_tensor,
-                agent_skills_tensor
+            # 计算所有智能体的个体技能判别器输出
+            agent_disc_log_probs = []
+            for i in range(n_agents):
+                next_obs_i = next_observations_tensor[i].unsqueeze(0)
+                with torch.no_grad():
+                    agent_disc_logits = self.individual_discriminator(next_obs_i, team_skill_tensor)
+                    agent_disc_log_prob = F.log_softmax(agent_disc_logits, dim=-1)[0, agent_skills[i]]
+                    agent_disc_log_probs.append(agent_disc_log_prob.item())
+            
+            # 计算团队平均内在奖励组件
+            env_reward_component = self.config.lambda_e * current_reward
+            team_disc_component = self.config.lambda_D * team_skill_log_prob.item()
+            avg_ind_disc_component = self.config.lambda_d * np.mean(agent_disc_log_probs)
+            
+            # 团队总内在奖励
+            team_intrinsic_reward = env_reward_component + team_disc_component + avg_ind_disc_component
+            
+            # 存储单个团队级别的低层经验
+            low_level_experience = (
+                state_tensor,                                                    # 全局状态s
+                team_skill_tensor,                                               # 团队技能Z
+                observations_tensor,                                             # 所有智能体观测 [n_agents, obs_dim]
+                agent_skills_tensor,                                             # 所有个体技能 [n_agents]
+                actions_tensor,                                                  # 所有智能体动作 [n_agents, action_dim]
+                torch.tensor(team_intrinsic_reward, device=self.device),        # 团队总内在奖励
+                torch.tensor(dones, dtype=torch.float, device=self.device),     # 是否结束
+                action_logprobs_tensor,                                          # 所有动作对数概率 [n_agents]
+                torch.tensor(env_reward_component, device=self.device),         # 环境奖励部分
+                torch.tensor(team_disc_component, device=self.device),          # 团队判别器部分
+                torch.tensor(avg_ind_disc_component, device=self.device)        # 平均个体判别器部分
             )
             
-            main_logger.debug(f"低层经验存储成功: worker_id={worker_id}, n_agents={n_agents}, "
-                            f"奖励={current_reward:.4f}, 缓冲区大小={len(self.low_level_buffer)}")
+            self.low_level_buffer.push(low_level_experience)
+            
+            # 记录存储成功
+            buffer_size_after = len(self.low_level_buffer)
+            main_logger.debug(f"✅ [LOW_LEVEL_STORE] Worker {worker_id} 团队级低层经验存储成功: "
+                           f"存储了1个团队经验(包含{n_agents}个智能体), "
+                           f"低层缓冲区 {buffer_size_before}→{buffer_size_after}")
             
             return True
             
         except Exception as e:
-            main_logger.error(f"存储低层经验失败: {e}")
+            main_logger.error(f"❌ [LOW_LEVEL_STORE] Worker {worker_id} 低层经验存储失败: {e}")
             return False
 
     def store_transition(self, state, next_state, observations, next_observations,
@@ -2357,35 +2482,37 @@ class HMASDAgent:
                mean_state_value, mean_agent_value, mean_high_level_reward
     
     def update_discoverer(self):
-        """更新低层技能发现器网络"""
+        """更新低层技能发现器网络 - 修复版本：适配团队级低层经验格式"""
         if len(self.low_level_buffer) < self.config.batch_size:
             return 0, 0, 0, 0, 0, 0, 0, 0, 0 # 增加返回数量以匹配期望（9个值）
         
-        # 从缓冲区采样数据，包含内在奖励的三个组成部分
+        # 【关键修复】从缓冲区采样团队级低层经验数据
         batch = self.low_level_buffer.sample(self.config.batch_size)
         states, team_skills, observations, agent_skills, actions, rewards, dones, old_log_probs, \
         env_rewards_comp, team_disc_rewards_comp, ind_disc_rewards_comp = zip(*batch)
         
-        states = torch.stack(states)
-        team_skills = torch.stack(team_skills)
-        observations = torch.stack(observations)
-        agent_skills = torch.stack(agent_skills)
-        actions = torch.stack(actions)
-        rewards = torch.stack(rewards)
-        dones = torch.stack(dones)
-        old_log_probs = torch.stack(old_log_probs)
+        states = torch.stack(states)  # [batch_size, state_dim]
+        team_skills = torch.stack(team_skills)  # [batch_size]
+        observations = torch.stack(observations)  # [batch_size, n_agents, obs_dim]
+        agent_skills = torch.stack(agent_skills)  # [batch_size, n_agents]
+        actions = torch.stack(actions)  # [batch_size, n_agents, action_dim]
+        rewards = torch.stack(rewards)  # [batch_size] - 团队总内在奖励
+        dones = torch.stack(dones)  # [batch_size]
+        old_log_probs = torch.stack(old_log_probs)  # [batch_size, n_agents]
+        
+        # 【关键修复】适配团队级低层经验格式
+        batch_size, n_agents = observations.shape[0], observations.shape[1]
         
         # 初始化GRU隐藏状态
-        self.skill_discoverer.init_hidden(batch_size=self.config.batch_size)
+        self.skill_discoverer.init_hidden(batch_size=batch_size)
         
-        # 获取当前状态价值
-        values = self.skill_discoverer.get_value(states, team_skills)
+        # 【修复】计算团队级状态价值 - 使用团队技能而不是个体技能
+        values = self.skill_discoverer.get_value(states, team_skills)  # [batch_size, 1]
         
         # 构造下一状态的占位符
         next_values = torch.zeros_like(values)  # 实际应用中应该使用真实下一状态计算
         
-        # 计算GAE
-        # 确保传递给compute_gae的values是1D，使用clone避免原地操作
+        # 计算GAE - 使用团队级奖励
         advantages, returns = compute_gae(rewards.clone(), values.squeeze(-1).clone(), 
                                          next_values.squeeze(-1).clone(), dones.clone(), 
                                          self.config.gamma, self.config.gae_lambda)
@@ -2393,15 +2520,29 @@ class HMASDAgent:
         advantages = advantages.detach()
         returns = returns.detach()
         
-        # 重新初始化GRU隐藏状态
-        self.skill_discoverer.init_hidden(batch_size=self.config.batch_size)
+        # 【关键修复】处理团队级动作和log probs
+        # 需要将团队级数据展开为个体级数据进行训练
         
-        # 获取当前策略
-        _, action_log_probs, action_dist = self.skill_discoverer(observations, agent_skills)
+        # 展开observations和agent_skills为个体级别
+        observations_flat = observations.view(-1, observations.shape[-1])  # [batch_size * n_agents, obs_dim]
+        agent_skills_flat = agent_skills.view(-1)  # [batch_size * n_agents]
+        actions_flat = actions.view(-1, actions.shape[-1])  # [batch_size * n_agents, action_dim]
+        old_log_probs_flat = old_log_probs.view(-1)  # [batch_size * n_agents]
+        
+        # 扩展advantages到个体级别
+        advantages_expanded = advantages.unsqueeze(1).expand(-1, n_agents).contiguous().view(-1)  # [batch_size * n_agents]
+        
+        # 重新初始化GRU隐藏状态用于个体级别的前向传播
+        self.skill_discoverer.init_hidden(batch_size=batch_size * n_agents)
+        
+        # 获取当前策略 - 使用展开的个体级数据
+        _, action_log_probs_flat, action_dist_flat = self.skill_discoverer(
+            observations_flat.unsqueeze(1), agent_skills_flat, deterministic=False
+        )
         
         # 计算策略比率，使用detach()防止求导错误
-        old_log_probs_detached = old_log_probs.clone().detach()
-        ratios = torch.exp(action_log_probs - old_log_probs_detached)
+        old_log_probs_detached = old_log_probs_flat.clone().detach()
+        ratios = torch.exp(action_log_probs_flat.squeeze() - old_log_probs_detached)
         
         # 限制策略比率
         surr1 = ratios * advantages
@@ -2436,7 +2577,7 @@ class HMASDAgent:
             main_logger.debug("使用MSE Loss计算发现器价值损失")
         
         # 计算熵损失
-        entropy_loss = -action_dist.entropy().mean() * self.config.lambda_l
+        entropy_loss = -action_dist_flat.entropy().mean() * self.config.lambda_l
         
         # 总损失
         loss = policy_loss + self.config.value_loss_coef * value_loss + entropy_loss
@@ -2447,10 +2588,9 @@ class HMASDAgent:
         torch.nn.utils.clip_grad_norm_(self.skill_discoverer.parameters(), self.config.max_grad_norm)
         self.discoverer_optimizer.step()
         
-        # 清空低层缓冲区，确保on-policy训练
-        buffer_size_before = len(self.low_level_buffer)
-        self.low_level_buffer.clear()
-        main_logger.info(f"底层策略更新完成，已清空low_level_buffer（之前大小: {buffer_size_before}）")
+        # 【PPO修复】移除此处的缓冲区清空，应在所有PPO epochs完成后清空
+        # 这样确保所有15个PPO epochs都能使用相同的数据进行训练
+        # 缓冲区清空现在在rollout_update()方法的末尾进行
         
         # 计算内在奖励各部分的平均值
         avg_intrinsic_reward = rewards.mean().item()
